@@ -82,7 +82,7 @@ function serve({
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
     skillsAutoUpdate: null,
-    effectiveSkillsAutoUpdate: true,
+    effectiveSkillsAutoUpdate: true, toolsAutoInstall: false, effectiveToolsAutoInstall: false,
     composerDefaults: {
       autonomous: null,
       worktree: null,
@@ -219,7 +219,7 @@ describe('Agent accounts → Defaults for new projects', () => {
             browseRoot: '~/',
             projectsDir: '~/cezar/projects',
             skillsAutoUpdate: null,
-            effectiveSkillsAutoUpdate: true,
+            effectiveSkillsAutoUpdate: true, toolsAutoInstall: false, effectiveToolsAutoInstall: false,
             composerDefaults: {
               autonomous: null,
               worktree: null,
