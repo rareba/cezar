@@ -1,9 +1,20 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { HostUsage } from '@open-mercato/cezar-contract';
+import { DISPATCH_MAX_IN_FLIGHT, type HostUsage } from '@open-mercato/cezar-contract';
 import { currentHostUsage, HOST_SAMPLE_INTERVAL_MS, HOST_SAMPLE_STALE_MS, onHostUsage } from '../core/host-usage.ts';
 import { allUsage, onUsage, type ProcessUsage } from '../core/process-usage.ts';
 import { agentMemoryBlock, hostReserveBlock, type HostReserve } from './host-headroom.ts';
+import {
+  effectiveCapacity,
+  freeFromHost,
+  headroomRuns,
+  observedPerRun,
+  stepScale,
+  type ClassCounts,
+  type PoolClass,
+  type PoolLimits,
+} from './effective-capacity.ts';
+export type { ClassCounts, PoolClass, PoolLimits } from './effective-capacity.ts';
 import { DEFAULT_IDLE_TIMEOUT_MINUTES, DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.ts';
 
 /**
@@ -58,6 +69,15 @@ export interface WorkspaceResourceLimits {
   hostReserve?: HostReserve;
   /** Ceiling on the summed RSS of all agent trees before a NEW run starts. Absent/null = off. */
   totalAgentMemoryMb?: number | null;
+  /** Own pool for dispatched `implement` children; absent/null = share `maxParallel`
+   *  (spec 2026-10-21-work-limits). */
+  maxSubagents?: number | null;
+  /** Own pool for dispatched `review` children; absent/null = share `maxParallel`. */
+  maxReviewers?: number | null;
+  /** Scale every pool down to what free memory and CPU can carry. Default off. */
+  autoScale?: boolean;
+  /** Children one task may have in flight; absent = `DISPATCH_MAX_IN_FLIGHT` (4). */
+  maxChildrenPerParent?: number;
   /**
    * Per-project concurrency ceilings, keyed by realpath-normalized project
    * root (the registry stores normalized `root`). A root absent from the map
@@ -102,6 +122,8 @@ export interface SemaphoreParticipant {
   /** Slots this manager currently holds. The #347 exemption lives in the
    *  participant's own accounting: `waiting` runs are already subtracted. */
   busySlots(): number;
+  /** The same slots split by pool. Optional so stubs keep working: absent reads as all `main`. */
+  busyByClass?(): ClassCounts;
   /** Kick the manager's queue — capacity may have appeared. Awaited by
    *  `release()` so the manager taking a freed slot has registered it before
    *  the next participant evaluates capacity. */
@@ -153,6 +175,10 @@ async function loadResourceLimits(): Promise<WorkspaceResourceLimits> {
     monitoringWakeIntervalMinutes: resources.monitoringWakeIntervalMinutes,
     autoResumeOnUsageLimit: resources.autoResumeOnUsageLimit,
     memoryLimitMb: resources.memoryLimitMb,
+    maxSubagents: resources.maxSubagents,
+    maxReviewers: resources.maxReviewers,
+    autoScale: resources.autoScale,
+    maxChildrenPerParent: resources.maxChildrenPerParent,
     agentCpuPriority: resources.agentCpuPriority,
     hostReserve: resources.hostReserve,
     totalAgentMemoryMb: resources.totalAgentMemoryMb,
@@ -173,7 +199,7 @@ export interface WorkspaceSemaphoreOptions {
   host?: {
     current(): HostUsage | undefined;
     subscribe(listener: () => void): () => void;
-    agentUsage(): Record<string, Pick<ProcessUsage, 'rssBytes'>>;
+    agentUsage(): Record<string, Pick<ProcessUsage, 'rssBytes'> & { cpuPct?: number }>;
     subscribeAgents(listener: () => void): () => void;
     now(): number;
   };
@@ -207,6 +233,13 @@ export class WorkspaceSemaphore {
   private lastStartAt = Number.NEGATIVE_INFINITY;
   /** The gate turned a start away; the next tick re-pumps. */
   private hostDeferred = false;
+  /** autoScale's current effective limits (null = use the configured ones) and the calm-sample
+   *  counters that gate a raise. */
+  private scaled: PoolLimits | null = null;
+  private scaledAt = 0;
+  /** Headroom (runs) behind `scaled`; undefined when unreadable. */
+  private room: number | undefined;
+  private calm = { main: 0, subagent: 0, review: 0 };
 
   constructor(options: WorkspaceSemaphoreOptions = {}) {
     this.load = options.load ?? loadResourceLimits;
@@ -232,28 +265,33 @@ export class WorkspaceSemaphore {
   /** Sample the host only while a guard is configured (zero cost by default). */
   private syncHostGate(): void {
     const onTick = () => {
-      // Host and agent samplers both fire every ~2 s: count ONE tick per sample period so the
-      // one-start-per-tick brake does not run at double rate with both guards on.
+      // Host and agent samplers both fire every ~2 s: count ONE tick (and one autoScale step) per
+      // sample period so the brake and the calm counters do not run at double rate.
       const at = this.host.now();
+      let raised = false;
       if (at - this.lastTickAt >= HOST_SAMPLE_INTERVAL_MS / 2) {
         this.ticks += 1;
         this.lastTickAt = at;
+        raised = this.rescale();
       }
-      if (!this.hostDeferred) return;
+      if (!this.hostDeferred && !raised) return;
       this.hostDeferred = false;
-      void this.release(); // pressure may have cleared
+      void this.release(); // pressure may have cleared, or a pool grew
     };
-    if (this.reserve() && !this.offHost) this.offHost = this.host.subscribe(onTick);
-    else if (!this.reserve() && this.offHost) {
+    const wantHost = this.reserve() !== null || this.autoScale();
+    if (wantHost && !this.offHost) this.offHost = this.host.subscribe(onTick);
+    else if (!wantHost && this.offHost) {
       this.offHost();
       this.offHost = null;
     }
+    if (!this.autoScale()) this.scaled = null;
+    else this.rescale(true);
     if (this.totalAgentMemoryMb() !== null && !this.offAgents) this.offAgents = this.host.subscribeAgents(onTick);
     else if (this.totalAgentMemoryMb() === null && this.offAgents) {
       this.offAgents();
       this.offAgents = null;
     }
-    if (!this.reserve() && this.totalAgentMemoryMb() === null) {
+    if (!wantHost && this.totalAgentMemoryMb() === null) {
       this.hostDeferred = false;
       this.ticks = 0;
       this.startTick = -1;
@@ -271,6 +309,7 @@ export class WorkspaceSemaphore {
     this.ticks = 0;
     this.startTick = -1;
     this.lastTickAt = Number.NEGATIVE_INFINITY;
+    this.scaled = null;
   }
 
   /** Why a NEW run must wait for the host, or null (spec 2026-10-21-host-resource-limits).
@@ -279,11 +318,12 @@ export class WorkspaceSemaphore {
   hostBlock(): string | null {
     const reserve = this.reserve();
     const totalMb = this.totalAgentMemoryMb();
-    if (!reserve && totalMb === null) return null;
+    const braking = this.brakeApplies();
+    if (!reserve && totalMb === null && !braking) return null;
     if (this.busy() === 0) return null;
     // One start per sample period — including before the first sample exists, so a startup burst
     // cannot all pass the fail-open. A sampler silent for a stale window lifts the brake (fail open).
-    if (this.ticks === this.startTick && this.host.now() - this.lastStartAt <= HOST_SAMPLE_STALE_MS) {
+    if (braking && this.ticks === this.startTick && this.host.now() - this.lastStartAt <= HOST_SAMPLE_STALE_MS) {
       return 'waiting for a fresh reading after the last start';
     }
     let usage = this.host.current();
@@ -303,11 +343,140 @@ export class WorkspaceSemaphore {
     if (this.hostBlock() !== null) this.hostDeferred = true;
   }
 
+  /** The one-start-per-tick brake: always with a reserve/total guard; with autoScale alone only
+   *  once the computed room is nearly gone, so a roomy machine still fills its pools at once. */
+  private brakeApplies(): boolean {
+    if (this.reserve() || this.totalAgentMemoryMb() !== null) return true;
+    return this.autoScale() && this.scaled !== null && this.room !== undefined && this.room < 2;
+  }
+
   /** `pump()` just dequeued a run through the gate. */
   noteGatedStart(): void {
-    if (!this.reserve() && this.totalAgentMemoryMb() === null) return;
+    if (!this.brakeApplies()) return;
     this.startTick = this.ticks;
     this.lastStartAt = this.host.now();
+  }
+
+  // ---- pools (spec 2026-10-21-work-limits) ----
+
+  /** True once a kind has a pool of its own; until then nothing needs classifying. */
+  hasSeparatePools(): boolean {
+    return !!this.limits.maxSubagents || !!this.limits.maxReviewers;
+  }
+
+  /** Per-parent fan-out cap enforced by `dispatch()` and told to the agent. */
+  maxChildrenPerParent(): number {
+    return this.limits.maxChildrenPerParent ?? DISPATCH_MAX_IN_FLIGHT;
+  }
+
+  autoScale(): boolean {
+    return this.limits.autoScale === true;
+  }
+
+  private configuredLimits(): PoolLimits {
+    return {
+      main: this.limits.maxParallel,
+      subagent: this.limits.maxSubagents ?? null,
+      review: this.limits.maxReviewers ?? null,
+    };
+  }
+
+  /** Which pool a run draws from. A kind only gets its own pool when that pool is configured;
+   *  otherwise it counts against `maxParallel` exactly as before. */
+  classify(dispatch: { parentRunId?: string; kind?: string } | undefined): PoolClass {
+    if (!dispatch?.parentRunId) return 'main';
+    if (dispatch.kind === 'review') return this.limits.maxReviewers ? 'review' : 'main';
+    return this.limits.maxSubagents ? 'subagent' : 'main';
+  }
+
+  /** Held slots by pool, across every manager. A stub without a split is all `main`. */
+  busyBy(): ClassCounts {
+    const total: ClassCounts = { main: 0, subagent: 0, review: 0 };
+    for (const p of this.participants) {
+      const by = p.busyByClass?.() ?? { main: p.busySlots(), subagent: 0, review: 0 };
+      total.main += by.main;
+      total.subagent += by.subagent;
+      total.review += by.review;
+    }
+    return total;
+  }
+
+  /**
+   * The limits admission uses now, as `{main, subagent, review}` (null = that kind shares main):
+   * autoScale's while its reading is fresh, else the configured ones. Public, with `freeCapacity()`,
+   * for readouts and the fleet hub. A reading older than a stale window is dropped here, so
+   * silent telemetry can never leave a lowered limit stuck.
+   */
+  effectiveLimits(): PoolLimits {
+    if (this.scaled && this.host.now() - this.scaledAt <= HOST_SAMPLE_STALE_MS) return this.scaled;
+    return this.configuredLimits();
+  }
+
+  /** Limit of one pool; a pool without its own limit is the main pool. */
+  limitOf(pool: PoolClass): number {
+    const eff = this.effectiveLimits();
+    return (pool === 'main' ? eff.main : eff[pool]) ?? eff.main;
+  }
+
+  /** Room in the pool a run would draw from (per-project cap is the manager's own business). */
+  poolHasRoom(pool: PoolClass): boolean {
+    return this.busyBy()[pool] < this.limitOf(pool);
+  }
+
+  /** Free slots per pool (effective limit - busy, >= 0). A kind without its own pool reports the
+   *  main pool's room, because that is what it would take. */
+  freeCapacity(): ClassCounts {
+    const busy = this.busyBy();
+    const room = (pool: PoolClass) => Math.max(0, this.limitOf(pool) - busy[pool]);
+    const main = room('main');
+    return { main, subagent: this.limits.maxSubagents ? room('subagent') : main, review: this.limits.maxReviewers ? room('review') : main };
+  }
+
+  /** Recompute autoScale from the newest host sample. Returns true when any pool grew.
+   *  Fails open: no fresh sample or nothing readable means the configured limits. */
+  private rescale(reset = false): boolean {
+    if (!this.autoScale()) return false;
+    let usage = this.host.current();
+    if (usage && this.host.now() - Date.parse(usage.sampledAt) > HOST_SAMPLE_STALE_MS) usage = undefined;
+    const configured = this.configuredLimits();
+    const input = usage
+      ? {
+          configured,
+          busy: this.busyBy(),
+          ...freeFromHost(usage, this.limits.hostReserve?.memoryMb ?? null),
+          ...observedPerRun(this.host.agentUsage()),
+        }
+      : undefined;
+    if (!input || headroomRuns(input) === undefined) {
+      // Nothing readable: back to the configured limits at once, never a slow ramp.
+      const wasLower = this.scaled !== null;
+      this.scaled = null;
+      this.room = undefined;
+      this.calm = { main: 0, subagent: 0, review: 0 };
+      return wasLower;
+    }
+    const next = effectiveCapacity(input);
+    this.room = headroomRuns(input);
+    this.scaledAt = this.host.now();
+    if (reset) {
+      // A config change starts from the current headroom, not from the old scaled baseline.
+      this.scaled = next;
+      this.calm = { main: 0, subagent: 0, review: 0 };
+      return false;
+    }
+    const prev = this.scaled ?? configured;
+    let grew = false;
+    const step = (pool: PoolClass): number | null => {
+      const target = pool === 'main' ? next.main : next[pool];
+      const before = pool === 'main' ? prev.main : prev[pool];
+      if (target === null || before === null) return target;
+      const r = stepScale(before, target, this.calm[pool]);
+      this.calm[pool] = r.calm;
+      if (r.value > before) grew = true;
+      return r.value;
+    };
+    this.scaled = { main: step('main') as number, subagent: step('subagent'), review: step('review') };
+    return grew;
   }
 
   /** Join the shared counter. Returns the unregister handle — the manager's

@@ -566,7 +566,7 @@ export class WorktreeLifecycleCoordinator {
   private async pump(): Promise<void> {
     if (this.disposed || !this.cleanupStarted) return;
     for (const [id] of this.queue) {
-      if (this.options.semaphore.busy() >= this.options.semaphore.maxParallel() || this.executing.size + this.options.busySlots() >= this.options.semaphore.projectMaxParallel(this.root)) break;
+      if (!this.options.semaphore.poolHasRoom('main') || this.executing.size + this.options.busySlots() >= this.options.semaphore.projectMaxParallel(this.root)) break;
       // Same host-headroom gate (and liveness rule) as RunManager.pump (spec 2026-10-21-host-resource-limits).
       if (!this.options.semaphore.hostAdmits()) { this.options.semaphore.noteHostDeferral(); break; }
       this.options.semaphore.noteGatedStart();
