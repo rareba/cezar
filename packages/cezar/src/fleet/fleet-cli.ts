@@ -5,6 +5,7 @@
  */
 import { parseArgs } from 'node:util';
 import {
+  fleetEventsResponseSchema,
   fleetJobSchema,
   fleetMetricsSchema,
   fleetStatusResponseSchema,
@@ -41,6 +42,7 @@ const USAGE = `cezar fleet — hand work to a fleet of cezar instances (CEZ_FLEE
   cezar fleet status [--json]     nodes and jobs
   cezar fleet cancel <jobId>      cancel a queued or running job
   cezar fleet drain <node> [--undo]   a node takes no new jobs; what it holds finishes
+  cezar fleet events [--since <seq>] [--follow] [--json]   job events (started, finished, failed, needs input), once each
   cezar fleet metrics [--prometheus]  pending jobs and free slots per pool (what an autoscaler reads)`;
 
 function hubBase(env: FleetCliEnv): string | null {
@@ -85,7 +87,8 @@ export async function runFleetCommand(
     const response = await io.fetch(`${base}/api/v1/fleet${path}`, {
       ...init,
       headers: { authorization: `Bearer ${env.CEZ_FLEET_TOKEN}`, ...(init.body ? { 'content-type': 'application/json' } : {}) },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      // A long-poll (`events --follow`) legitimately waits up to 20 s for its first event.
+      signal: AbortSignal.timeout(path.includes('wait=') ? 40_000 : REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(await readError(response));
     return response.json();
@@ -148,6 +151,17 @@ export async function runFleetCommand(
       if (!nodeId) throw new Error('give the node: cezar fleet drain <node> [--undo]');
       await call(`/nodes/${encodeURIComponent(nodeId)}/drain`, { method: 'POST', body: JSON.stringify({ drain: !values.undo }) });
       io.log(values.undo ? `${nodeId} takes jobs again` : `${nodeId} is draining: no new jobs`);
+      return 0;
+    }
+    if (command === 'events') {
+      const { values } = parseArgs({ args: rest, options: { since: { type: 'string' }, follow: { type: 'boolean', default: false }, json: { type: 'boolean', default: false } } });
+      let cursor = values.since ? Number(values.since) : 0;
+      if (!Number.isInteger(cursor) || cursor < 0) throw new Error('--since must be a sequence number');
+      do {
+        const page = fleetEventsResponseSchema.parse(await call(`/events?since=${cursor}${values.follow ? '&wait=20' : ''}`));
+        for (const event of page.events) io.log(values.json ? JSON.stringify(event) : `${event.seq}  ${event.at}  ${event.text}`);
+        cursor = page.next;
+      } while (values.follow);
       return 0;
     }
     if (command === 'metrics') {

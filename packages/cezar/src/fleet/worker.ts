@@ -22,7 +22,7 @@ export interface FleetRunHost {
   /** Resolve the job's repo to a local project (cloning if needed) and start a run; returns the run id. */
   start(job: FleetJob): Promise<string>;
   /** The run's current state, or undefined when it is gone. */
-  get(runId: string): { status: string; branch?: string; error?: string } | undefined;
+  get(runId: string): { status: string; branch?: string; error?: string; needsInput?: string } | undefined;
   cancel(runId: string): void;
   /** Live fleet runs recovered from this node's previous process, for the worker to adopt. */
   recover(): Promise<RecoveredRun[]>;
@@ -63,6 +63,7 @@ interface Held {
   branchUrl?: string;
   error?: string;
   status: FleetJobReport['status'];
+  needsInput?: string;
   publishing: boolean;
   startedAt: number;
   /** Cancelled/dropped by the hub, possibly while `host.start()` was still cloning. */
@@ -257,6 +258,7 @@ export class FleetWorker {
         continue;
       }
       if (run.branch) held.branch = run.branch;
+      if (run.needsInput) held.needsInput = run.needsInput;
       if (LIVE_RUN.has(run.status)) held.status = 'running';
       else if (run.status === 'done' || run.status === 'review') void this.finish(held);
       else {
@@ -301,5 +303,6 @@ function report(held: Held): FleetJobReport {
     ...(held.prUrl ? { prUrl: held.prUrl } : {}),
     ...(held.branchUrl ? { branchUrl: held.branchUrl } : {}),
     ...(held.error ? { error: held.error } : {}),
+    ...(held.needsInput ? { needsInput: held.needsInput } : {}),
   };
 }

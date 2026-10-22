@@ -219,6 +219,15 @@ reports per pool (`any` and one per tag) the pending jobs, running jobs and free
 what an autoscaler reads: scale a pool out while `pending` exceeds `freeSlots`, scale in by draining
 an idle node and removing it. See `.ai/specs/2026-10-22-fleet-routing.md`.
 
+## Events: one alert per transition
+
+The hub records an event when a job starts, needs input (the agent stopped on a question), finishes
+(with its PR link) or fails, once each however many nodes there are. Read them with
+`cezar fleet events --follow` (or `GET /api/v1/fleet/events?since=<seq>&wait=20`), or have the hub
+push each one to a URL you own with `CEZ_FLEET_EVENTS_WEBHOOK` (signed with the fleet token, retried
+until it gets a 2xx). Each event carries a ready one-line `text` for a chat relay. See
+`.ai/specs/2026-10-22-fleet-events.md`.
+
 ## Limits
 
 - Single hub, no HA. The queue is restart-safe through `jobs.json`; running jobs are kept if nodes

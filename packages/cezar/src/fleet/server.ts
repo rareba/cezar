@@ -3,8 +3,8 @@ import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { fleetDrainSchema, fleetHeartbeatSchema, fleetLeaseAcquireSchema, fleetLeaseRefSchema, fleetSubmitSchema } from '@open-mercato/cezar-contract';
-import { jsonZodValidator, paramZodValidator } from '../server/validators.ts';
+import { fleetDrainSchema, fleetEventsQuerySchema, fleetHeartbeatSchema, fleetLeaseAcquireSchema, fleetLeaseRefSchema, fleetSubmitSchema } from '@open-mercato/cezar-contract';
+import { jsonZodValidator, paramZodValidator, queryZodValidator } from '../server/validators.ts';
 import { FLEET_MIN_TOKEN_LENGTH } from './config.ts';
 import type { FleetHub } from './hub.ts';
 import { prometheusText } from './metrics.ts';
@@ -45,6 +45,10 @@ export function createFleetApp(hub: FleetHub, token: string) {
     .post('/heartbeat', limit(512 * 1024), jsonZodValidator(fleetHeartbeatSchema), (c) => c.json(hub.heartbeat(c.req.valid('json'))))
     .get('/status', (c) => c.json(hub.status()))
     .post('/jobs', limit(256 * 1024), jsonZodValidator(fleetSubmitSchema), (c) => c.json(hub.submit(c.req.valid('json')), 201))
+    .get('/events', queryZodValidator(fleetEventsQuerySchema), async (c) => {
+      const { since = 0, wait = 0 } = c.req.valid('query');
+      return c.json(await hub.eventsSince(since, wait * 1000));
+    })
     .get('/metrics', (c) => {
       const metrics = hub.metrics();
       if (c.req.query('format') !== 'prometheus') return c.json(metrics);

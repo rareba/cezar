@@ -7,6 +7,7 @@ import { loadLeases, saveLeases } from './leases-store.ts';
 import { NodeMailbox } from './mailbox.ts';
 import { loadMail, saveMail } from './mail-store.ts';
 import { loadDrained, saveDrained } from './drain-store.ts';
+import { EventForwarder, loadEvents, saveEvents } from './events.ts';
 import { platform } from 'node:os';
 import { createFleetRunHost, type BootProject } from './runs.ts';
 import { startFleetServer } from './server.ts';
@@ -74,9 +75,15 @@ export function startFleet(deps: StartFleetDeps): { stop(): void } {
   const localLeases = new LocalLeases();
   const mailbox = new NodeMailbox(() => config.nodeId);
   if (config.role === 'hub') {
-    const hub = new FleetHub({ initialJobs: loadJobs(), persist: saveJobs, initialLeases: loadLeases(), persistLeases: saveLeases, initialMail: loadMail(), persistMail: saveMail, initialDrained: loadDrained(), persistDrained: saveDrained });
+    const hub = new FleetHub({ initialJobs: loadJobs(), persist: saveJobs, initialLeases: loadLeases(), persistLeases: saveLeases, initialMail: loadMail(), persistMail: saveMail, initialDrained: loadDrained(), persistDrained: saveDrained, initialEvents: loadEvents(), persistEvents: saveEvents });
     setFleetView(hubView(hub, config.nodeId, localLeases, mailbox));
     const server = startFleetServer(hub, config.token, config.port, config.bind);
+    if (config.eventsWebhook) {
+      const forwarder = new EventForwarder(hub.events, { url: config.eventsWebhook, secret: config.token, warn: log });
+      forwarder.start();
+      stops.push(() => forwarder.stop());
+      log(`  fleet events -> webhook (${new URL(config.eventsWebhook).origin})`);
+    }
     const sweep = setInterval(() => hub.sweep(), SWEEP_MS);
     sweep.unref();
     stops.push(() => {
