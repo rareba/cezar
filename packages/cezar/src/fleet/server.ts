@@ -3,7 +3,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { fleetHeartbeatSchema, fleetSubmitSchema } from '@open-mercato/cezar-contract';
+import { fleetHeartbeatSchema, fleetLeaseAcquireSchema, fleetLeaseRefSchema, fleetSubmitSchema } from '@open-mercato/cezar-contract';
 import { jsonZodValidator, paramZodValidator } from '../server/validators.ts';
 import { FLEET_MIN_TOKEN_LENGTH } from './config.ts';
 import type { FleetHub } from './hub.ts';
@@ -43,6 +43,17 @@ export function createFleetApp(hub: FleetHub, token: string) {
     .post('/heartbeat', limit(512 * 1024), jsonZodValidator(fleetHeartbeatSchema), (c) => c.json(hub.heartbeat(c.req.valid('json'))))
     .get('/status', (c) => c.json(hub.status()))
     .post('/jobs', limit(256 * 1024), jsonZodValidator(fleetSubmitSchema), (c) => c.json(hub.submit(c.req.valid('json')), 201))
+    .get('/leases', (c) => c.json({ leases: hub.listLeases() }))
+    .post('/leases/acquire', limit(4 * 1024), jsonZodValidator(fleetLeaseAcquireSchema), (c) => c.json(hub.acquireLease(c.req.valid('json'))))
+    .post('/leases/renew', limit(4 * 1024), jsonZodValidator(fleetLeaseRefSchema), (c) => {
+      const { name, holder } = c.req.valid('json');
+      const lease = hub.renewLease(name, holder);
+      return lease ? c.json(lease) : c.json({ error: 'no such lease' }, 404);
+    })
+    .post('/leases/release', limit(4 * 1024), jsonZodValidator(fleetLeaseRefSchema), (c) => {
+      const { name, holder } = c.req.valid('json');
+      return c.json({ released: hub.releaseLease(name, holder) });
+    })
     .post('/jobs/:id/cancel', paramZodValidator(jobIdParam), (c) => {
       const job = hub.cancel(c.req.valid('param').id);
       return job ? c.json(job) : c.json({ error: 'not found' }, 404);

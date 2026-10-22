@@ -70,8 +70,61 @@ export const fleetJobReportSchema = z.object({
 });
 export type FleetJobReport = z.infer<typeof fleetJobReportSchema>;
 
+/** A lease name: what workflows lock on ("issue-123", "real-db-tests"). */
+export const fleetLeaseNameSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/);
+
+/**
+ * A named, expiring claim on something fleet-wide (spec 2026-10-22-fleet-leases). `holder` is the
+ * caller's own label (a run id, a CLI invocation); the lease lives only while its node's heartbeats
+ * keep naming it, so a dead node frees what it held.
+ */
+export const fleetLeaseSchema = z.object({
+  name: fleetLeaseNameSchema,
+  holder: z.string().min(1).max(200),
+  nodeId: z.string().min(1).max(200),
+  runId: z.string().max(100).optional(),
+  acquiredAt: z.string(),
+  expiresAt: z.string(),
+});
+export type FleetLease = z.infer<typeof fleetLeaseSchema>;
+
+/** What a node still stands behind; the heartbeat renews exactly these. */
+export const fleetLeaseRefSchema = z.object({ name: fleetLeaseNameSchema, holder: z.string().min(1).max(200) });
+export type FleetLeaseRef = z.infer<typeof fleetLeaseRefSchema>;
+
+/** Cockpit-side body (the node id is added by the cockpit); `limit` > 1 makes a counting semaphore. */
+export const fleetLeaseAcquireInputSchema = fleetLeaseRefSchema.extend({
+  runId: z.string().max(100).optional(),
+  projectId: z.string().max(100).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+export type FleetLeaseAcquireInput = z.infer<typeof fleetLeaseAcquireInputSchema>;
+
+/** Hub-side body: the same plus the node taking the lease. */
+export const fleetLeaseAcquireSchema = fleetLeaseAcquireInputSchema.omit({ projectId: true }).extend({
+  nodeId: z.string().min(1).max(200),
+});
+export type FleetLeaseAcquire = z.infer<typeof fleetLeaseAcquireSchema>;
+
+export const fleetLeaseAcquireResponseSchema = z.object({
+  acquired: z.boolean(),
+  /** The caller's lease when acquired. */
+  lease: fleetLeaseSchema.optional(),
+  /** Who holds the name now (when refused, the blockers). */
+  holders: z.array(fleetLeaseSchema),
+});
+export type FleetLeaseAcquireResponse = z.infer<typeof fleetLeaseAcquireResponseSchema>;
+
+export const fleetLeaseReleaseResponseSchema = z.object({ released: z.boolean() });
+export type FleetLeaseReleaseResponse = z.infer<typeof fleetLeaseReleaseResponseSchema>;
+
+export const fleetLeaseListResponseSchema = z.object({ leases: z.array(fleetLeaseSchema) });
+export type FleetLeaseListResponse = z.infer<typeof fleetLeaseListResponseSchema>;
+
 export const fleetHeartbeatSchema = fleetNodeSchema.omit({ lastSeen: true }).extend({
   jobs: z.array(fleetJobReportSchema).max(1000),
+  /** Every lease this node holds. Absent from a node that predates leases: the hub then leaves its leases alone. */
+  leases: z.array(fleetLeaseRefSchema).max(1000).optional(),
 });
 export type FleetHeartbeat = z.infer<typeof fleetHeartbeatSchema>;
 

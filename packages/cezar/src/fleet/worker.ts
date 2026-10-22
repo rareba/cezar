@@ -1,5 +1,5 @@
 import { cpus, freemem, loadavg, platform } from 'node:os';
-import type { FleetHeartbeat, FleetHeartbeatResponse, FleetJob, FleetJobReport } from '@open-mercato/cezar-contract';
+import type { FleetHeartbeat, FleetHeartbeatResponse, FleetJob, FleetJobReport, FleetLeaseRef } from '@open-mercato/cezar-contract';
 
 /**
  * The per-node worker loop (spec 2026-10-21-fleet-coordination). Every node — the hub included —
@@ -38,6 +38,8 @@ export interface FleetWorkerOptions {
    *  steer the whole fleet's distribution. */
   capacity: () => { free: number; max: number };
   intervalMs?: number;
+  /** The leases this node stands behind; the heartbeat names them so the hub keeps them alive. */
+  leases?: () => Promise<FleetLeaseRef[]> | FleetLeaseRef[];
   /** A job older than this is failed and its run cancelled. Unset = no limit (tests). */
   jobTimeoutMs?: number;
   now?: () => number;
@@ -132,6 +134,7 @@ export class FleetWorker {
         (h) => h.status === 'running' && (!h.runId || this.options.host.get(h.runId)?.status === 'queued'),
       ).length;
       const { free, max } = this.options.capacity();
+      const leases = await this.options.leases?.();
       let response: FleetHeartbeatResponse;
       try {
         response = await this.options.transport({
@@ -140,6 +143,7 @@ export class FleetWorker {
           capacity: { free: Math.max(0, free - starting), max },
           host: hostMetrics(),
           jobs: reports,
+          ...(leases ? { leases } : {}),
         });
         this.lastError = '';
       } catch (error) {
