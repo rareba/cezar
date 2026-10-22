@@ -17,7 +17,7 @@ import {
   terminalResizeSchema, terminalSessionParamsSchema, terminalSessionSchema, terminalStateSchema,
 } from '@open-mercato/cezar-contract';
 import { workspaceLayoutsResponseSchema, workspaceLayoutsSchema } from '@open-mercato/cezar-contract';
-import { fleetJobParamsSchema, type FleetPanel } from '@open-mercato/cezar-contract';
+import { fleetJobParamsSchema, fleetLeaseAcquireInputSchema, fleetLeaseRefSchema, type FleetPanel } from '@open-mercato/cezar-contract';
 import { getFleetView } from '../fleet/view.ts';
 import { deleteRunLayouts, readRunLayouts, writeRunLayouts } from '../runs/layouts.ts';
 import { discoverCommands, installCommand } from './terminal/commands.ts';
@@ -6405,6 +6405,45 @@ export function createApp(deps: ServerDeps) {
       try {
         const job = await view.cancel(c.req.valid('param').id);
         return job ? c.json(job, 200) : c.json({ error: 'not found' }, 404);
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    })
+    // Leases (spec 2026-10-22-fleet-leases): what `cez lease` calls. Taken in this node's name; the
+    // fleet token stays here and an agent only ever reaches the loopback cockpit.
+    .get('/workspace/fleet/leases', async (c) => {
+      const view = getFleetView();
+      if (!view) return c.json({ error: 'fleet is not enabled on this cezar' }, 404);
+      try {
+        return c.json({ leases: await view.listLeases() }, 200);
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    })
+    .post('/workspace/fleet/leases/acquire', jsonZodValidator(fleetLeaseAcquireInputSchema), async (c) => {
+      const view = getFleetView();
+      if (!view) return c.json({ error: 'fleet is not enabled on this cezar' }, 404);
+      try {
+        return c.json(await view.acquireLease(c.req.valid('json')), 200);
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    })
+    .post('/workspace/fleet/leases/renew', jsonZodValidator(fleetLeaseRefSchema), async (c) => {
+      const view = getFleetView();
+      if (!view) return c.json({ error: 'fleet is not enabled on this cezar' }, 404);
+      try {
+        const lease = await view.renewLease(c.req.valid('json'));
+        return lease ? c.json(lease, 200) : c.json({ error: 'no such lease' }, 404);
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    })
+    .post('/workspace/fleet/leases/release', jsonZodValidator(fleetLeaseRefSchema), async (c) => {
+      const view = getFleetView();
+      if (!view) return c.json({ error: 'fleet is not enabled on this cezar' }, 404);
+      try {
+        return c.json({ released: await view.releaseLease(c.req.valid('json')) }, 200);
       } catch (error) {
         return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
       }

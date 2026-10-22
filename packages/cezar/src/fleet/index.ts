@@ -2,6 +2,8 @@ import { fleetHeartbeatResponseSchema, type FleetHeartbeat, type FleetHeartbeatR
 import type { FleetConfig } from './config.ts';
 import { FleetHub } from './hub.ts';
 import { loadJobs, saveJobs } from './jobs-store.ts';
+import { LocalLeases, type LocalLease } from './leases-local.ts';
+import { loadLeases, saveLeases } from './leases-store.ts';
 import { createFleetRunHost, type BootProject } from './runs.ts';
 import { startFleetServer } from './server.ts';
 import { setFleetView, hubView, remoteView } from './view.ts';
@@ -49,6 +51,8 @@ export interface StartFleetDeps {
   context: (projectId: string) => Promise<BootProject>;
   /** Announce a project a fleet job just cloned (the server's `project-added` event). */
   onProjectAdded?: (project: { id: string; root: string }) => void;
+  /** Is the run that took a lease still working? Unknown runs count as over; failures as alive. */
+  runAlive?: (lease: LocalLease) => boolean | Promise<boolean>;
   log?: (message: string) => void;
 }
 
@@ -57,9 +61,10 @@ export function startFleet(deps: StartFleetDeps): { stop(): void } {
   const { config, log = console.log } = deps;
   const stops: Array<() => void> = [];
   let transport: (heartbeat: FleetHeartbeat) => Promise<FleetHeartbeatResponse>;
+  const localLeases = new LocalLeases();
   if (config.role === 'hub') {
-    const hub = new FleetHub({ initialJobs: loadJobs(), persist: saveJobs });
-    setFleetView(hubView(hub, config.nodeId));
+    const hub = new FleetHub({ initialJobs: loadJobs(), persist: saveJobs, initialLeases: loadLeases(), persistLeases: saveLeases });
+    setFleetView(hubView(hub, config.nodeId, localLeases));
     const server = startFleetServer(hub, config.token, config.port, config.bind);
     const sweep = setInterval(() => hub.sweep(), SWEEP_MS);
     sweep.unref();
@@ -72,7 +77,7 @@ export function startFleet(deps: StartFleetDeps): { stop(): void } {
     log(`  fleet hub → :${config.port} (${config.bind}) as node ${config.nodeId}`);
   } else {
     transport = httpTransport(config.hubUrl, config.token);
-    setFleetView(remoteView(config.hubUrl, config.token, config.nodeId));
+    setFleetView(remoteView(config.hubUrl, config.token, config.nodeId, fetch, localLeases));
     log(`  fleet worker → ${config.hubUrl} as node ${config.nodeId}`);
   }
   const host = createFleetRunHost({ boot: deps.boot, context: deps.context, onProjectAdded: deps.onProjectAdded });
@@ -82,6 +87,10 @@ export function startFleet(deps: StartFleetDeps): { stop(): void } {
     host,
     transport,
     capacity: () => localCapacity(deps.semaphore),
+    leases: async () => {
+      if (deps.runAlive) await localLeases.prune(deps.runAlive);
+      return localLeases.list();
+    },
     jobTimeoutMs: config.jobTimeoutMs,
     log,
   });

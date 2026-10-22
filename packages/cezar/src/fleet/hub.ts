@@ -3,10 +3,14 @@ import type {
   FleetHeartbeat,
   FleetHeartbeatResponse,
   FleetJob,
+  FleetLease,
+  FleetLeaseAcquire,
+  FleetLeaseAcquireResponse,
   FleetNode,
   FleetStatusResponse,
   FleetSubmit,
 } from '@open-mercato/cezar-contract';
+import { LeaseTable } from './leases.ts';
 import {
   LEASE_MS,
   applyReport,
@@ -28,6 +32,9 @@ export interface FleetHubOptions {
   initialJobs?: readonly FleetJob[];
   /** Called with the full queue whenever something other than a lease renewal changed. */
   persist?: (jobs: FleetJob[]) => void;
+  /** Saved leases (leases.json) and the writer for them. */
+  initialLeases?: readonly FleetLease[];
+  persistLeases?: (leases: FleetLease[]) => void;
   now?: () => number;
   newId?: () => string;
 }
@@ -42,9 +49,18 @@ export class FleetHub {
   private readonly now: () => number;
   private readonly newId: () => string;
   private readonly persist: (jobs: FleetJob[]) => void;
+  private readonly leases: LeaseTable;
 
   constructor(options: FleetHubOptions = {}) {
     this.now = options.now ?? Date.now;
+    const persistLeases = options.persistLeases ?? (() => {});
+    this.leases = new LeaseTable(options.initialLeases, this.now, (all) => {
+      try {
+        persistLeases(all);
+      } catch (error) {
+        console.warn(`fleet: could not save leases.json (${error instanceof Error ? error.message : String(error)})`);
+      }
+    });
     this.newId = options.newId ?? randomUUID;
     this.persist = options.persist ?? (() => {});
     for (const job of options.initialJobs ?? []) {
@@ -95,14 +111,33 @@ export class FleetHub {
       if (now - Date.parse(node.lastSeen) > FORGET_NODE_MS) this.nodes.delete(id);
     }
     if (expired.length > 0) this.save();
+    this.leases.sweep();
+  }
+
+  acquireLease(input: FleetLeaseAcquire): FleetLeaseAcquireResponse {
+    return this.leases.acquire(input);
+  }
+
+  renewLease(name: string, holder: string): FleetLease | undefined {
+    return this.leases.renew(name, holder);
+  }
+
+  releaseLease(name: string, holder: string): boolean {
+    return this.leases.release(name, holder);
+  }
+
+  listLeases(): FleetLease[] {
+    this.leases.sweep();
+    return this.leases.list();
   }
 
   heartbeat(hb: FleetHeartbeat): FleetHeartbeatResponse {
     const now = this.now();
-    const { jobs: reports, ...nodeInfo } = hb;
+    const { jobs: reports, leases: _leases, ...nodeInfo } = hb;
     const node: FleetNode = { ...nodeInfo, lastSeen: new Date(now).toISOString() };
     this.nodes.set(hb.nodeId, node);
     this.sweep();
+    if (hb.leases) this.leases.syncNode(hb.nodeId, hb.leases);
 
     const cancel: string[] = [];
     const drop: string[] = [];

@@ -45,6 +45,7 @@ import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 import { fleetConfigFromEnv } from './fleet/config.ts';
 import { runFleetCommand } from './fleet/fleet-cli.ts';
+import { runLeaseCommand } from './fleet/lease-cli.ts';
 import { startFleet } from './fleet/index.ts';
 import { probeProjectStatus } from './workspace/projects.ts';
 import type { ProjectContexts } from './server/project-context.ts';
@@ -70,6 +71,7 @@ Usage:
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
   cezar fleet <submit|status|cancel>  hand work to a fleet of cezar instances (opt-in: CEZ_FLEET_*, docs/fleet.md)
+  cezar lease <acquire|release|list|run>  fleet-wide locks for workflows ("one task per issue"; docs/fleet.md)
   cezar tracker-connections <list|remove ID>  inspect or delete local project credentials
   cezar secrets <list|set NAME|unset NAME>  this project's secrets (--workspace: the user's)
                             (set reads the value from stdin; agents never receive them)
@@ -129,6 +131,11 @@ async function main(): Promise<void> {
   // `cezar fleet …` talks to a fleet hub over its token-guarded listener; its flags (--repo …) are its own.
   if (process.argv[2] === 'fleet') {
     process.exitCode = await runFleetCommand(process.argv.slice(3));
+    return;
+  }
+  // `cez lease …` (spec 2026-10-22-fleet-leases) reaches the fleet through this machine's cockpit.
+  if (process.argv[2] === 'lease') {
+    process.exitCode = await runLeaseCommand(process.argv.slice(3));
     return;
   }
   // `cez task …` (spec 2026-09-10-dispatch) has its own flags, so it is routed before the
@@ -452,6 +459,17 @@ async function serveCommand(
         semaphore,
         boot: { root: repoRoot, dataDir: join(repoRoot, '.ai/cezar'), store, manager },
         context: (id) => contexts.context(id),
+        // A lease taken by a run ends with the run: unknown runs are over, a project that will not open is not.
+        runAlive: async ({ runId, projectId }) => {
+          if (!runId) return true;
+          try {
+            const owner = projectId && projectId !== bootProjectId ? (await contexts.context(projectId)).store : store;
+            const status = owner.getRun(runId)?.status;
+            return status === 'queued' || status === 'running' || status === 'waiting';
+          } catch {
+            return true;
+          }
+        },
         // A project a fleet job cloned shows up in open cockpits like one added from the UI.
         onProjectAdded: (entry) => void probeProjectStatus(entry.root).then((probe) => workspaceEvents.emit('project-added', { project: { ...entry, ...probe } })),
       });

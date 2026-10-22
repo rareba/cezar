@@ -159,6 +159,30 @@ nodes, which only need to reach the hub's fleet port.
 - Agents never receive `CEZ_FLEET_TOKEN` (or any `CEZ_*_TOKEN` / `CEZ_*_SECRET`): a prompt-injected
   agent cannot queue work on the fleet. Check steps and cockpit terminals are stripped of it too.
 
+## Leases: fleet-wide locks
+
+A lease is a named lock with an expiry, held on the hub: "only one task works issue 123", "one
+real-database test at a time". Workflows take them with `cez lease` (spec
+`.ai/specs/2026-10-22-fleet-leases.md`):
+
+```bash
+cez lease acquire issue-123 || exit 1            # exit 1 when someone else holds it
+cez lease run real-db --wait 600 -- npm run test:db   # wait up to 10 min, run, always release
+cez lease acquire browsers --limit 3             # at most 3 holders at once
+cez lease release issue-123
+cez lease list
+```
+
+`cez lease` talks to this machine's cockpit (`CEZ_API_URL`, set inside every task), which holds the
+fleet token and takes the lease in its node's name, so an agent never sees the token. Without
+`--holder`, the holder is the task id (`CEZ_TASK_ID`), so `acquire` and `release` from the same task
+agree. `--if-fleet` carries on as if the lease were taken when the cockpit has no fleet role, so one
+workflow runs unchanged on a single instance.
+
+A lease lasts 60 s and the node's heartbeat renews it. It frees itself when the node dies (no
+heartbeat), when the run that took it ends, or when someone releases it. It is persisted in
+`fleet/leases.json` on the hub; after a hub restart every holder gets a fresh 60 s to re-heartbeat.
+
 ## Limits
 
 - Single hub, no HA. The queue is restart-safe through `jobs.json`; running jobs are kept if nodes
