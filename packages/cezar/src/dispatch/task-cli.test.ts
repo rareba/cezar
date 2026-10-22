@@ -26,6 +26,21 @@ describe('cez task', () => {
     return { calls, out, err, io };
   };
 
+  it('send posts a message to the workspace fleet mail route, addressing a job or a run@node', async () => {
+    const h = harness({ status: 201, body: { id: 'm1' } });
+    expect(await runTaskCommand(['send', 'job:abc', 'please', 'stop'], env, h.io)).toBe(0);
+    expect(h.calls[0]?.url).toBe('http://127.0.0.1:4321/api/v1/workspace/fleet/mail');
+    expect(JSON.parse(String(h.calls[0]?.init?.body))).toEqual({ to: { jobId: 'abc' }, body: 'please stop', fromRunId: 'run-1' });
+    await runTaskCommand(['send', 'run-9@node-b', 'hi', '--subject', 'yo'], env, h.io);
+    expect(JSON.parse(String(h.calls[1]?.init?.body))).toMatchObject({ to: { runId: 'run-9', nodeId: 'node-b' }, subject: 'yo' });
+  });
+
+  it('send explains itself when there is no fleet', async () => {
+    const h = harness({ status: 404, body: { error: 'fleet is not enabled on this cezar' } });
+    expect(await runTaskCommand(['send', 'run-9', 'hi'], env, h.io)).toBe(1);
+    expect(h.err.join()).toContain('fleet is not enabled');
+  });
+
   it('create posts the task order to the parent’s dispatch route, scoped to the project', async () => {
     const h = harness({ status: 201, body: { id: 'child-1', branch: 'cez/child1' } });
     const code = await runTaskCommand(

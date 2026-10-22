@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { FleetHeartbeat, FleetHeartbeatResponse, FleetJob } from '@open-mercato/cezar-contract';
 import { localCapacity } from './index.ts';
 import { repoKey } from './runs.ts';
+import { NodeMailbox } from './mailbox.ts';
 import { FleetWorker, type FleetRunHost } from './worker.ts';
 
 const job = (id: string, over: Partial<FleetJob> = {}): FleetJob => ({
@@ -27,7 +28,8 @@ function setup(over: Partial<FleetRunHost> = {}) {
     transport: async (hb) => { sent.push(hb); const r = reply; reply = { assigned: [], cancel: [], drop: [] }; return r; },
     capacity: () => ({ free: 2, max: 2 }),
   });
-  return { host, worker, runs, sent, calls, reply: (r: Partial<FleetHeartbeatResponse>) => { reply = { assigned: [], cancel: [], drop: [], ...r }; } };
+  const next = () => { const r = reply; reply = { assigned: [], cancel: [], drop: [] }; return r; };
+  return { host, worker, runs, sent, calls, next, reply: (r: Partial<FleetHeartbeatResponse>) => { reply = { assigned: [], cancel: [], drop: [], ...r }; } };
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const last = (s: FleetHeartbeat[]) => s[s.length - 1] as FleetHeartbeat;
@@ -256,5 +258,50 @@ describe('repoKey', () => {
   });
   it('is null for something that is not a repo', () => {
     expect(repoKey('/local/path')).toBeNull();
+  });
+});
+
+describe('FleetWorker mail', () => {
+  const parent = { nodeId: 'p', runId: 'run-p', rootRunId: 'run-p', jobId: 'job-p', projectId: 'proj' };
+
+  it('mails a settled sub-task report to its parent, after the hub has its final status', async () => {
+    const mailbox = new NodeMailbox(() => 'n1');
+    const t = setup({ settleReport: (_id, extra) => ({ text: `report ${extra.prUrl}`, title: 'child', report: { status: 'done', result: 'ok', evidence: [], side_effects: [], errors: [], suggestions: [] } }) });
+    const worker = new FleetWorker({
+      nodeId: 'n1', version: '1', host: t.host, mailbox,
+      transport: async (hb) => { t.sent.push(hb); const r = t.next(); return r; },
+      capacity: () => ({ free: 2, max: 2 }),
+    });
+    t.reply({ assigned: [job('j1', { parent, title: 'child' })] });
+    await worker.tick();
+    await settle();
+    t.runs.set('run-j1', { status: 'done', branch: 'cez/abc' });
+    await worker.tick(); // publishes
+    await settle();
+    await worker.tick(); // reports done to the hub; the mail is queued after it
+    expect(mailbox.peekOutbox()).toHaveLength(1);
+    expect(mailbox.peekOutbox()[0]).toMatchObject({ kind: 'report', to: { runId: 'run-p', nodeId: 'p', projectId: 'proj' }, report: { status: 'done' } });
+    expect(mailbox.peekOutbox()[0]?.body).toContain('https://github.com/a/b/pull/1');
+    await worker.tick(); // outbox rides this heartbeat
+    expect(last(t.sent).outbox).toHaveLength(1);
+    await worker.tick();
+    expect(last(t.sent).outbox).toBeUndefined();
+  });
+
+  it('hands mail the hub sends into the host and acknowledges it on the next heartbeat', async () => {
+    const mailbox = new NodeMailbox(() => 'n1');
+    const delivered: string[] = [];
+    const t = setup({ deliverMail: async (m) => { delivered.push(m.id); } });
+    const worker = new FleetWorker({
+      nodeId: 'n1', version: '1', host: t.host, mailbox,
+      transport: async (hb) => { t.sent.push(hb); return t.next(); },
+      capacity: () => ({ free: 2, max: 2 }),
+    });
+    const m = { id: 'mail-00001', to: { runId: 'r', nodeId: 'n1' }, from: { nodeId: 'p' }, kind: 'message' as const, subject: 's', body: 'b', createdAt: '' };
+    t.reply({ mail: [m] });
+    await worker.tick();
+    expect(delivered).toEqual(['mail-00001']);
+    await worker.tick();
+    expect(last(t.sent).mailAck).toEqual(['mail-00001']);
   });
 });

@@ -193,6 +193,15 @@ is itself a fleet job), the in-flight cap counts fleet children too, and cancell
 cancels its children. `cez task create ... --local` keeps the child on the parent's node. See
 `.ai/specs/2026-10-22-fleet-subtasks.md`.
 
+## Mailboxes
+
+A cross-node sub-task reports to its parent through the hub: when the child's job settles, its node
+mails the report (with the PR link) to the parent's node, which delivers it into the parent task
+like a local child's report. `cez task send <run id|job:<job id>>[@node] "<message>"` mails any
+task, on any node; a child is addressed by the job id `cez task create` printed. Mail travels on the
+node heartbeat in both directions (delivery within about 5 s) and is kept on the hub until the
+recipient's node acknowledges it. See `.ai/specs/2026-10-22-fleet-mailbox.md`.
+
 ## Limits
 
 - Single hub, no HA. The queue is restart-safe through `jobs.json`; running jobs are kept if nodes

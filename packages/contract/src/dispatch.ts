@@ -97,7 +97,7 @@ export const dispatchSchema = z.object({
   /** This task's spend ceiling in USD, carved out of its parent's. Absent = none of its own. */
   budgetUsd: z.number().nonnegative().optional(),
   /** Set when the parent runs on ANOTHER fleet node (spec 2026-10-22-fleet-subtasks): `parentRunId` then names a run that is not in this store. */
-  remoteParent: z.object({ nodeId: z.string(), jobId: z.string().optional() }).optional(),
+  remoteParent: z.object({ nodeId: z.string(), jobId: z.string().optional(), projectId: z.string().optional() }).optional(),
   /** This task's own report — last one wins. */
   report: dispatchReportSchema.optional(),
   /** Reports from settled children waiting for this task's next session. */

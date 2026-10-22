@@ -1,5 +1,6 @@
 import { cpus, freemem, loadavg, platform } from 'node:os';
-import type { FleetHeartbeat, FleetHeartbeatResponse, FleetJob, FleetJobReport, FleetLeaseRef } from '@open-mercato/cezar-contract';
+import type { DispatchReport, FleetHeartbeat, FleetHeartbeatResponse, FleetJob, FleetJobReport, FleetLeaseRef, FleetMail } from '@open-mercato/cezar-contract';
+import type { NodeMailbox } from './mailbox.ts';
 
 /**
  * The per-node worker loop (spec 2026-10-21-fleet-coordination). Every node — the hub included —
@@ -25,6 +26,10 @@ export interface FleetRunHost {
   cancel(runId: string): void;
   /** Live fleet runs recovered from this node's previous process, for the worker to adopt. */
   recover(): Promise<RecoveredRun[]>;
+  /** Deliver mail into a task on this node. Resolves normally once handled (or the task is unknown); throws to be retried. */
+  deliverMail?(mail: FleetMail): Promise<void>;
+  /** The report a settled run hands its parent (prose + structured), or undefined when it has no run record. */
+  settleReport?(runId: string, extra: { prUrl?: string; branchUrl?: string }): { text: string; report: DispatchReport; title: string } | undefined;
   /** Push the run's branch and open a draft PR so the result survives an ephemeral pod. */
   publish(runId: string): Promise<{ ok: true; url?: string; branchUrl?: string } | { ok: false; error: string }>;
 }
@@ -40,6 +45,8 @@ export interface FleetWorkerOptions {
   intervalMs?: number;
   /** The leases this node stands behind; the heartbeat names them so the hub keeps them alive. */
   leases?: () => Promise<FleetLeaseRef[]> | FleetLeaseRef[];
+  /** This node's mail: sub-task reports to a remote parent, and what the hub hands in. */
+  mailbox?: NodeMailbox;
   /** A job older than this is failed and its run cancelled. Unset = no limit (tests). */
   jobTimeoutMs?: number;
   now?: () => number;
@@ -135,6 +142,8 @@ export class FleetWorker {
       ).length;
       const { free, max } = this.options.capacity();
       const leases = await this.options.leases?.();
+      const outbox = this.options.mailbox?.peekOutbox() ?? [];
+      const acks = this.options.mailbox?.peekAcks() ?? [];
       let response: FleetHeartbeatResponse;
       try {
         response = await this.options.transport({
@@ -144,6 +153,8 @@ export class FleetWorker {
           host: hostMetrics(),
           jobs: reports,
           ...(leases ? { leases } : {}),
+          ...(outbox.length > 0 ? { outbox } : {}),
+          ...(acks.length > 0 ? { mailAck: acks } : {}),
         });
         this.lastError = '';
       } catch (error) {
@@ -152,7 +163,10 @@ export class FleetWorker {
         this.lastError = message;
         return;
       }
+      this.options.mailbox?.sent(outbox, acks);
       this.apply(response, reports);
+      const { mailbox, host } = this.options;
+      if (mailbox && host.deliverMail && response.mail?.length) await mailbox.receive(response.mail, (m) => host.deliverMail!(m));
     } finally {
       this.ticking = false;
     }
@@ -160,7 +174,12 @@ export class FleetWorker {
 
   private apply(response: FleetHeartbeatResponse, sent: FleetJobReport[]): void {
     // The hub has seen the final report of a finished job; only now is it safe to forget it.
-    for (const r of sent) if (r.status === 'done' || r.status === 'failed') this.held.delete(r.id);
+    for (const r of sent) {
+      if (r.status !== 'done' && r.status !== 'failed') continue;
+      const held = this.held.get(r.id);
+      if (held) this.mailParent(held);
+      this.held.delete(r.id);
+    }
     for (const id of [...response.cancel, ...response.drop]) this.release(id);
     for (const job of response.assigned) {
       if (this.held.has(job.id)) continue; // redelivered assignment we already acted on
@@ -168,6 +187,31 @@ export class FleetWorker {
       this.held.set(job.id, held);
       void this.begin(held);
     }
+  }
+
+  /** A sub-task whose parent runs elsewhere reports to it by mail once its job has settled (spec 2026-10-22-fleet-mailbox). */
+  private mailParent(held: Held): void {
+    const parent = held.job.parent;
+    const mailbox = this.options.mailbox;
+    if (!parent || !mailbox || held.released) return;
+    const settled = held.runId ? this.options.host.settleReport?.(held.runId, { prUrl: held.prUrl, branchUrl: held.branchUrl }) : undefined;
+    const failed = held.status === 'failed';
+    const report: DispatchReport = settled?.report ?? {
+      status: failed ? 'failed' : 'done',
+      result: held.error ?? (failed ? 'the job failed' : 'finished'),
+      evidence: [], side_effects: [], errors: held.error ? [held.error] : [], suggestions: [],
+    };
+    const links = [held.prUrl ? `PR ${held.prUrl}` : '', held.branchUrl ? `branch ${held.branchUrl}` : ''].filter(Boolean).join(', ');
+    const title = settled?.title ?? held.job.title ?? 'sub-task';
+    const text = settled?.text ?? `Report from task "${title}" (job ${held.job.id}): status ${report.status}; ${report.result}${links ? `; ${links}` : ''}`;
+    mailbox.send({
+      to: { runId: parent.runId, nodeId: parent.nodeId, ...(parent.projectId ? { projectId: parent.projectId } : {}) },
+      from: { ...(held.runId ? { runId: held.runId } : {}), title },
+      kind: 'report',
+      subject: `Report from ${title}`,
+      body: text.slice(0, 19_000),
+      report,
+    });
   }
 
   private async begin(held: Held): Promise<void> {

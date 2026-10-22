@@ -11,10 +11,12 @@ import {
   type FleetLeaseAcquireInput,
   type FleetLeaseAcquireResponse,
   type FleetLeaseRef,
+  type FleetMailInput,
   type FleetStatusResponse,
 } from '@open-mercato/cezar-contract';
 import type { FleetHub } from './hub.ts';
 import { LocalLeases } from './leases-local.ts';
+import { NodeMailbox } from './mailbox.ts';
 
 /**
  * What the cockpit's Fleet panel reads (spec 2026-10-21-fleet-coordination): the hub's state,
@@ -35,6 +37,8 @@ export interface FleetView {
   renewLease(ref: FleetLeaseRef): Promise<FleetLease | undefined>;
   releaseLease(ref: FleetLeaseRef): Promise<boolean>;
   listLeases(): Promise<FleetLease[]>;
+  /** Mail a task (spec 2026-10-22-fleet-mailbox): queued on this node, delivered by the next heartbeat. */
+  sendMail(input: FleetMailInput): { id: string };
 }
 
 let current: FleetView | undefined;
@@ -44,7 +48,7 @@ export const setFleetView = (view: FleetView | undefined): void => {
   current = view;
 };
 
-export function hubView(hub: FleetHub, nodeId: string, local: LocalLeases = new LocalLeases()): FleetView {
+export function hubView(hub: FleetHub, nodeId: string, local: LocalLeases = new LocalLeases(), mailbox: NodeMailbox = new NodeMailbox(() => nodeId)): FleetView {
   return {
     role: 'hub',
     nodeId,
@@ -66,12 +70,13 @@ export function hubView(hub: FleetHub, nodeId: string, local: LocalLeases = new 
     async listLeases() {
       return hub.listLeases();
     },
+    sendMail: (input) => ({ id: queueMail(mailbox, nodeId, input) }),
   };
 }
 
 const TIMEOUT_MS = 10_000;
 
-export function remoteView(hubUrl: string, token: string, nodeId: string, fetchImpl: typeof fetch = fetch, local: LocalLeases = new LocalLeases()): FleetView {
+export function remoteView(hubUrl: string, token: string, nodeId: string, fetchImpl: typeof fetch = fetch, local: LocalLeases = new LocalLeases(), mailbox: NodeMailbox = new NodeMailbox(() => nodeId)): FleetView {
   const call = (path: string, init: RequestInit = {}) =>
     fetchImpl(`${hubUrl}/api/v1/fleet${path}`, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(TIMEOUT_MS) });
   return {
@@ -117,7 +122,18 @@ export function remoteView(hubUrl: string, token: string, nodeId: string, fetchI
       if (!res.ok) throw new Error(`hub answered ${res.status}`);
       return fleetLeaseListResponseSchema.parse(await res.json()).leases;
     },
+    sendMail: (input) => ({ id: queueMail(mailbox, nodeId, input) }),
   };
+}
+
+function queueMail(mailbox: NodeMailbox, nodeId: string, input: FleetMailInput): string {
+  return mailbox.send({
+    to: input.to,
+    from: { nodeId, ...(input.fromRunId ? { runId: input.fromRunId } : {}) },
+    kind: 'message',
+    subject: input.subject ?? 'Message',
+    body: input.body,
+  });
 }
 
 const post = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });

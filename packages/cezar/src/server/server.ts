@@ -17,7 +17,7 @@ import {
   terminalResizeSchema, terminalSessionParamsSchema, terminalSessionSchema, terminalStateSchema,
 } from '@open-mercato/cezar-contract';
 import { workspaceLayoutsResponseSchema, workspaceLayoutsSchema } from '@open-mercato/cezar-contract';
-import { fleetJobParamsSchema, fleetLeaseAcquireInputSchema, fleetLeaseRefSchema, type FleetPanel } from '@open-mercato/cezar-contract';
+import { fleetJobParamsSchema, fleetLeaseAcquireInputSchema, fleetMailInputSchema, fleetLeaseRefSchema, type FleetPanel } from '@open-mercato/cezar-contract';
 import { getFleetView } from '../fleet/view.ts';
 import { deleteRunLayouts, readRunLayouts, writeRunLayouts } from '../runs/layouts.ts';
 import { discoverCommands, installCommand } from './terminal/commands.ts';
@@ -6452,6 +6452,13 @@ export function createApp(deps: ServerDeps) {
       } catch (error) {
         return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
       }
+    })
+    // Mail (spec 2026-10-22-fleet-mailbox): what `cez task send` calls. Queued on this node and
+    // carried to the hub by the next heartbeat.
+    .post('/workspace/fleet/mail', jsonZodValidator(fleetMailInputSchema), (c) => {
+      const view = getFleetView();
+      if (!view) return c.json({ error: 'fleet is not enabled on this cezar' }, 404);
+      return c.json(view.sendMail(c.req.valid('json')), 201);
     })
     .post('/workspace/fleet/leases/renew', jsonZodValidator(fleetLeaseRefSchema), async (c) => {
       const view = getFleetView();

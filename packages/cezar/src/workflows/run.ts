@@ -88,7 +88,7 @@ import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/stor
 // Task dispatch (spec 2026-09-10-dispatch). Every import below is inert unless the feature is
 // ON *and* the run carries a `dispatch`: `dispatchOf()` is the single gate, and a run without one
 // takes byte-for-byte the path it took before this feature existed.
-import type { DispatchInput, DispatchIntent, DispatchReport, FleetSubmit, RunDispatch } from '@open-mercato/cezar-contract';
+import type { DispatchInput, DispatchIntent, DispatchReport, FleetMail, FleetSubmit, RunDispatch } from '@open-mercato/cezar-contract';
 import { resolveCapabilities } from '../server/capabilities.ts';
 import { composeDispatchPrompt } from '../dispatch/prompts.ts';
 import {
@@ -2670,6 +2670,52 @@ export class RunManager {
       stepId: this.active.get(runId)?.currentStepId,
       message: `report recorded — status ${report.status}${report.verdict ? `, verdict ${report.verdict}` : ''}`,
     });
+    return true;
+  }
+
+  /**
+   * Mail from a task on another fleet node (spec 2026-10-22-fleet-mailbox): a child's settle report,
+   * or a message addressed to this task. Delivered like a local child's report — into the open
+   * session, the queued prompt stack, or the starting-up buffer; a settled parent is continued for a
+   * report. A message to a task that cannot take it now waits in the tree inbox, which the task reads
+   * at its next turn end. Returns false when the run is not in this store.
+   */
+  receiveMail(mail: FleetMail): boolean {
+    const runId = mail.to.runId;
+    const run = this.store.getRun(runId);
+    if (!run) return false;
+    const at = new Date().toISOString();
+    const from = mail.from.title ?? mail.from.runId ?? mail.from.nodeId;
+    const text = mail.kind === 'report' ? mail.body : `Message from ${from} (node ${mail.from.nodeId}) — ${mail.subject}: ${mail.body}`;
+    const blocks: PastedContent[] = [{ type: 'text', text }];
+    this.store.appendEvent(runId, { type: 'note', message: `${mail.kind} received from ${from} on node ${mail.from.nodeId}` });
+    const fromRunId = mail.from.runId ?? mail.id;
+    if (mail.kind === 'report' && mail.report && this.dispatchEnabled()) {
+      if (!run.dispatch) this.store.updateRun(runId, { dispatch: { rootRunId: runId } });
+      const report = mail.report;
+      this.updateDispatch(runId, (dispatch) => withPendingReport(dispatch, { fromRunId, title: mail.from.title ?? from, report, at }));
+      const state = this.active.get(runId);
+      if (state) state.monitoringWakeups = 0;
+      if (run.monitoringWakeCapReached) this.store.updateRun(runId, { monitoringWakeCapReached: undefined });
+    }
+    if (this.deliverMessage(runId, blocks, false) || this.enqueueMessage(runId, blocks)) {
+      if (mail.kind === 'report') this.ackPendingReport(runId, fromRunId, at);
+      return true;
+    }
+    if (this.deferMessage(runId, blocks)) return true;
+    if (mail.kind === 'report') {
+      // `cancelled` stays cancelled: nothing a child says may restart a task a human stopped.
+      if (['done', 'failed', 'review'].includes(run.status)) this.continueRun(runId, { text }, true);
+    } else if (this.dispatchEnabled()) {
+      if (!run.dispatch) this.store.updateRun(runId, { dispatch: { rootRunId: runId } });
+      const root = this.store.getRun(runId)?.dispatch?.rootRunId ?? runId;
+      try {
+        writeInboxMessage(this.dataDir, root, inboxName(runId, root), { from: mail.from.runId ?? mail.from.nodeId, subject: mail.subject, body: mail.body });
+        this.notifyTreeInboxes(root, mail.from.runId ?? '');
+      } catch {
+        // written state, never required
+      }
+    }
     return true;
   }
 

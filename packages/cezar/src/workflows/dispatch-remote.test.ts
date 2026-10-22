@@ -99,4 +99,31 @@ describe('dispatchRemote', () => {
     expect(manager.recordReport(child.id, { status: 'done', result: 'ok', evidence: [], side_effects: [], errors: [], suggestions: [] })).toBe(true);
     expect(store.getRun(child.id)?.dispatch?.remoteParent).toEqual({ nodeId: 'node-a' });
   });
+
+  const mailTo = (runId: string, over: Record<string, unknown> = {}) => ({
+    id: `mail-${Math.random()}`, to: { runId, nodeId: 'node-a' }, from: { nodeId: 'node-b', runId: 'child-1', title: 'the child' },
+    kind: 'report' as const, subject: 's', body: 'Report from task "the child": status done; ok', createdAt: '', ...over,
+  });
+
+  it('receiveMail turns a remote child report into a pending report and wakes a settled parent', () => {
+    const parent = store.createRun({ title: 'parent', workflow: 'w', task: 'parent', steps: [] });
+    store.updateRun(parent.id, { status: 'done' });
+    const report = { status: 'done' as const, result: 'ok', evidence: [], side_effects: [], errors: [], suggestions: [] };
+    expect(manager.receiveMail(mailTo(parent.id, { report }))).toBe(true);
+    const events = store.readEvents(parent.id).map((e) => String(e.message ?? ''));
+    expect(events.some((m) => m.includes('report received from the child on node node-b'))).toBe(true);
+    expect(store.getRun(parent.id)?.dispatch?.rootRunId).toBe(parent.id);
+  });
+
+  it('receiveMail answers false for a run it does not have', () => {
+    expect(manager.receiveMail(mailTo('ghost'))).toBe(false);
+  });
+
+  it('receiveMail leaves a message for a finished task in its tree inbox', () => {
+    const task = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    store.updateRun(task.id, { status: 'done' });
+    expect(manager.receiveMail(mailTo(task.id, { kind: 'message', subject: 'ping', body: 'are you there' }))).toBe(true);
+    expect(store.getRun(task.id)?.dispatch?.rootRunId).toBe(task.id);
+    expect(store.getRun(task.id)?.status).toBe('done'); // a message does not restart a finished task
+  });
 });

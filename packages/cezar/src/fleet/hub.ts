@@ -6,11 +6,14 @@ import type {
   FleetLease,
   FleetLeaseAcquire,
   FleetLeaseAcquireResponse,
+  FleetMail,
+  FleetMailSubmit,
   FleetNode,
   FleetStatusResponse,
   FleetSubmit,
 } from '@open-mercato/cezar-contract';
 import { LeaseTable } from './leases.ts';
+import { MailTable } from './mailbox.ts';
 import {
   LEASE_MS,
   applyReport,
@@ -35,6 +38,9 @@ export interface FleetHubOptions {
   /** Saved leases (leases.json) and the writer for them. */
   initialLeases?: readonly FleetLease[];
   persistLeases?: (leases: FleetLease[]) => void;
+  /** Undelivered task mail (mail.json) and its writer. */
+  initialMail?: readonly FleetMail[];
+  persistMail?: (mail: FleetMail[]) => void;
   now?: () => number;
   newId?: () => string;
 }
@@ -50,9 +56,18 @@ export class FleetHub {
   private readonly newId: () => string;
   private readonly persist: (jobs: FleetJob[]) => void;
   private readonly leases: LeaseTable;
+  private readonly mail: MailTable;
 
   constructor(options: FleetHubOptions = {}) {
     this.now = options.now ?? Date.now;
+    const persistMail = options.persistMail ?? (() => {});
+    this.mail = new MailTable(options.initialMail, this.now, (all) => {
+      try {
+        persistMail(all);
+      } catch (error) {
+        console.warn(`fleet: could not save mail.json (${error instanceof Error ? error.message : String(error)})`);
+      }
+    });
     const persistLeases = options.persistLeases ?? (() => {});
     this.leases = new LeaseTable(options.initialLeases, this.now, (all) => {
       try {
@@ -132,6 +147,11 @@ export class FleetHub {
     return this.leases.release(name, holder);
   }
 
+  /** Queue mail for a task (the hub's own CLI path; nodes send through their heartbeat outbox). */
+  sendMail(mail: FleetMailSubmit): void {
+    this.mail.accept(mail, this.jobs);
+  }
+
   listLeases(): FleetLease[] {
     this.leases.sweep();
     return this.leases.list();
@@ -139,7 +159,7 @@ export class FleetHub {
 
   heartbeat(hb: FleetHeartbeat): FleetHeartbeatResponse {
     const now = this.now();
-    const { jobs: reports, leases: _leases, ...nodeInfo } = hb;
+    const { jobs: reports, leases: _leases, outbox, mailAck, ...nodeInfo } = hb;
     const node: FleetNode = { ...nodeInfo, lastSeen: new Date(now).toISOString() };
     this.nodes.set(hb.nodeId, node);
     this.sweep();
@@ -175,7 +195,12 @@ export class FleetHub {
       changed = true;
     }
     if (changed) this.save();
-    return { assigned, cancel, drop };
+    // Mail last: a job that just reported its run id can now be addressed by job id.
+    for (const m of outbox ?? []) this.mail.accept(m, this.jobs);
+    this.mail.ack(hb.nodeId, mailAck ?? []);
+    this.mail.resolve(this.jobs);
+    const mail = this.mail.forNode(hb.nodeId);
+    return { assigned, cancel, drop, ...(mail.length > 0 ? { mail } : {}) };
   }
 
   status(): FleetStatusResponse {
