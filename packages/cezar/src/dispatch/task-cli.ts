@@ -33,6 +33,8 @@ const USAGE = `cez task — dispatch cezar tasks from inside a task (on by defau
   cez task report --status done|partial|failed|blocked --result "…" [--evidence "…"]…
                   [--verdict approve|changes|reject] [--suggestions "…"]… [--confidence <0-1>]
                   [--side-effect "…"]… [--error "…"]… [--next "…"]
+  cez task send <run id|job:<job id>>[@<node>] "<message>" [--subject "…"]
+                                      (fleet only) message a task on any node; it arrives within a heartbeat
   cez task list                       the tree this task belongs to, with status and cost
   cez task tree <run id>              the tree rooted at (or containing) another run`;
 
@@ -173,6 +175,27 @@ export async function runTaskCommand(
         });
         if (!response.ok) throw new Error(`report refused — ${await readError(response)}`);
         io.log(`report recorded — status ${values.status}${values.verdict ? `, verdict ${values.verdict}` : ''}. It is delivered to your parent when this task settles.`);
+        return 0;
+      }
+      case 'send': {
+        const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { subject: { type: 'string' } } });
+        const [target, ...words] = positionals;
+        const body = words.join(' ').trim();
+        if (!target || !body) throw new Error('usage: cez task send <run id|job:<job id>>[@<node>] "<message>"');
+        const [id = '', nodeId] = target.split('@');
+        const isJob = id.startsWith('job:');
+        const response = await io.fetch(`${api.url}/api/v1/workspace/fleet/mail`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            to: { ...(isJob ? { jobId: id.slice(4) } : { runId: id }), ...(nodeId ? { nodeId } : {}) },
+            body,
+            ...(values.subject ? { subject: values.subject } : {}),
+            ...(env.CEZ_TASK_ID ? { fromRunId: env.CEZ_TASK_ID } : {}),
+          }),
+        });
+        if (!response.ok) throw new Error(`send refused — ${await readError(response)}`);
+        io.log('sent: delivered to the task by the next fleet heartbeat (a few seconds)');
         return 0;
       }
       case 'list':

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FleetHub } from '../fleet/hub.ts';
 import { runLeaseCommand, type LeaseCliIo } from '../fleet/lease-cli.ts';
 import { LocalLeases } from '../fleet/leases-local.ts';
+import { NodeMailbox } from '../fleet/mailbox.ts';
 import { hubView, setFleetView } from '../fleet/view.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
@@ -93,5 +94,19 @@ describe('cez lease through the cockpit', () => {
     };
     expect(await runLeaseCommand(['acquire', 'real-db', '--wait', '30'], env, waiting)).toBe(0);
     expect(polls).toBe(2);
+  });
+
+  it('mail: 404 without a fleet role; with one, queues the message in the node outbox', async () => {
+    const body = JSON.stringify({ to: { jobId: 'job-1' }, body: 'hi', fromRunId: 'run-1' });
+    const post = () => apiRequest(app(), '/api/v1/workspace/fleet/mail', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    expect((await post()).status).toBe(404);
+    const mailbox = new NodeMailbox(() => 'hub');
+    setFleetView(hubView(new FleetHub(), 'hub', new LocalLeases(), mailbox));
+    const res = await post();
+    expect(res.status).toBe(201);
+    expect(mailbox.peekOutbox()).toHaveLength(1);
+    expect(mailbox.peekOutbox()[0]).toMatchObject({ kind: 'message', to: { jobId: 'job-1' }, from: { nodeId: 'hub', runId: 'run-1' }, body: 'hi' });
+    const bad = await apiRequest(app(), '/api/v1/workspace/fleet/mail', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: {}, body: 'x' }) });
+    expect(bad.status).toBe(400);
   });
 });

@@ -1,4 +1,5 @@
-import type { FleetJob } from '@open-mercato/cezar-contract';
+import type { FleetJob, FleetMail } from '@open-mercato/cezar-contract';
+import { childSettleReport, handoffSectionExcerpt } from '../dispatch/engine.ts';
 import { execFile } from 'node:child_process';
 import { isSafeGitRef } from '../git-refs.ts';
 import { isGithubHost } from '../github-hosts.ts';
@@ -136,7 +137,7 @@ export function createFleetRunHost(deps: FleetRunHostDeps): FleetRunHost {
               dispatch: {
                 rootRunId: job.parent.rootRunId,
                 parentRunId: job.parent.runId,
-                remoteParent: { nodeId: job.parent.nodeId, ...(job.parent.jobId ? { jobId: job.parent.jobId } : {}) },
+                remoteParent: { nodeId: job.parent.nodeId, ...(job.parent.jobId ? { jobId: job.parent.jobId } : {}), ...(job.parent.projectId ? { projectId: job.parent.projectId } : {}) },
                 ...(job.kind === 'review' ? { kind: 'review' as const } : {}),
                 ...(job.maxCostUsd ? { budgetUsd: job.maxCostUsd } : {}),
               },
@@ -182,6 +183,35 @@ export function createFleetRunHost(deps: FleetRunHostDeps): FleetRunHost {
 
     cancel(runId) {
       owners.get(runId)?.manager.cancel(runId);
+    },
+
+    /** The run a mail is for: the hinted project first, then every project this node serves. */
+    async deliverMail(mail: FleetMail) {
+      const runId = mail.to.runId;
+      const candidates: BootProject[] = [deps.boot];
+      const hinted = mail.to.projectId;
+      if (hinted) {
+        const hintedProject = await deps.context(hinted).catch(() => undefined);
+        if (hintedProject) candidates.unshift(hintedProject);
+      }
+      for (const entry of await listProjects()) {
+        if (entry.status !== 'ok' || entry.root === deps.boot.root || entry.id === hinted) continue;
+        const project = await deps.context(entry.id).catch(() => undefined);
+        if (project) candidates.push(project);
+      }
+      const owner = candidates.find((project) => project.store.getRun(runId));
+      // An unknown run is acknowledged too: nobody here will ever be able to take it.
+      owner?.manager.receiveMail(mail);
+    },
+
+    settleReport(runId, extra) {
+      const project = owners.get(runId);
+      const run = project?.store.getRun(runId);
+      if (!project || !run) return undefined;
+      const resumeNotes = handoffSectionExcerpt(readHandoff(project.dataDir, runId), '## Resume notes');
+      const settled = childSettleReport(run, { resumeNotes });
+      const links = [extra.prUrl ? `PR ${extra.prUrl}` : '', extra.branchUrl ? `branch page ${extra.branchUrl}` : ''].filter(Boolean).join(', ');
+      return { text: links ? `${settled.text}; ${links}` : settled.text, report: settled.report, title: run.title };
     },
 
     async publish(runId) {
