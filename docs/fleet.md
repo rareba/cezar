@@ -183,6 +183,16 @@ A lease lasts 60 s and the node's heartbeat renews it. It frees itself when the 
 heartbeat), when the run that took it ends, or when someone releases it. It is persisted in
 `fleet/leases.json` on the hub; after a hub restart every holder gets a fresh 60 s to re-heartbeat.
 
+## Sub-tasks on any node
+
+With a fleet role, a task that runs `cez task create "<objective>"` hands the child to the hub
+instead of starting it on its own machine; any node with room runs it, from the repository's base
+branch (the parent's unpushed branch is not reachable from another machine), and finishes with a
+pushed branch and a draft PR. The job carries its parent's node and run (and job id when the parent
+is itself a fleet job), the in-flight cap counts fleet children too, and cancelling a parent job
+cancels its children. `cez task create ... --local` keeps the child on the parent's node. See
+`.ai/specs/2026-10-22-fleet-subtasks.md`.
+
 ## Limits
 
 - Single hub, no HA. The queue is restart-safe through `jobs.json`; running jobs are kept if nodes

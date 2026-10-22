@@ -29,6 +29,7 @@ const USAGE = `cez task — dispatch cezar tasks from inside a task (on by defau
   cez task create "<objective>" [--title "…"] [--kind implement|review] [--review-of <branch|run>]
                   [--scope "…"] [--budget <usd>] [--success "…"] [--evidence "…"] [--tools A,B]
                   [--runner ${RUNNER_IDS.join('|')}] [--model <model>] [--retry-limit <0-3>]
+                  [--local]       (fleet only) run it on this node instead of any node
   cez task report --status done|partial|failed|blocked --result "…" [--evidence "…"]…
                   [--verdict approve|changes|reject] [--suggestions "…"]… [--confidence <0-1>]
                   [--side-effect "…"]… [--error "…"]… [--next "…"]
@@ -102,6 +103,7 @@ export async function runTaskCommand(
             runner: { type: 'string' },
             model: { type: 'string' },
             'retry-limit': { type: 'string' },
+            local: { type: 'boolean', default: false },
           },
         });
         const objective = positionals.join(' ').trim();
@@ -120,6 +122,7 @@ export async function runTaskCommand(
           ...(values.runner ? { runner: values.runner } : {}),
           ...(values.model ? { model: values.model } : {}),
           ...(values['retry-limit'] !== undefined ? { retry_limit: number(values['retry-limit'], 'retry-limit') } : {}),
+          ...(values.local ? { local: true } : {}),
         };
         const response = await io.fetch(`${api.scope}/runs/${encodeURIComponent(env.CEZ_TASK_ID)}/dispatch`, {
           method: 'POST',
@@ -127,8 +130,10 @@ export async function runTaskCommand(
           body: JSON.stringify(body),
         });
         if (!response.ok) throw new Error(`dispatch refused — ${await readError(response)}`);
-        const created = (await response.json()) as { id: string; branch?: string };
-        io.log(`dispatched ${created.id}${created.branch ? ` on branch ${created.branch}` : ''}`);
+        const created = (await response.json()) as { id: string; branch?: string; fleet?: boolean };
+        if (created.fleet) {
+          io.log(`dispatched ${created.id} to the fleet: it runs on another node from the repository base branch (not your branch) and opens a draft PR when it finishes`);
+        } else io.log(`dispatched ${created.id}${created.branch ? ` on branch ${created.branch}` : ''}`);
         io.log('It reports into this session when it settles. End your turn with CEZ:MONITORING to wait for it.');
         return 0;
       }

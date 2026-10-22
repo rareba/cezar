@@ -179,3 +179,15 @@ describe('fleet listener leases', () => {
     expect((await app.request('/api/v1/fleet/leases')).status).toBe(401);
   });
 });
+
+describe('sub-task jobs', () => {
+  const parent = { nodeId: 'n1', runId: 'r1', rootRunId: 'r1', jobId: 'job-1' };
+  it('carry their parent, and die with a cancelled parent job', () => {
+    const hub = new FleetHub({ now: () => T0, newId: (() => { let n = 0; return () => `job-${++n}`; })() });
+    const p = hub.submit({ repoUrl: 'a/b', task: 'parent' });
+    const child = hub.submit({ repoUrl: 'a/b', task: 'child', title: 'c', kind: 'review', maxCostUsd: 2, parent: { ...parent, jobId: p.id } });
+    expect(hub.getJob(child.id)).toMatchObject({ title: 'c', kind: 'review', maxCostUsd: 2, parent: { jobId: p.id } });
+    hub.cancel(p.id);
+    expect(hub.getJob(child.id)?.status).toBe('cancelled');
+  });
+});

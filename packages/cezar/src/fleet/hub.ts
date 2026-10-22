@@ -80,6 +80,10 @@ export class FleetHub {
       ...(input.workflowId ? { workflowId: input.workflowId } : {}),
       ...(input.runner ? { runner: input.runner } : {}),
       ...(input.model ? { model: input.model } : {}),
+      ...(input.parent ? { parent: input.parent } : {}),
+      ...(input.title ? { title: input.title } : {}),
+      ...(input.kind ? { kind: input.kind } : {}),
+      ...(input.maxCostUsd ? { maxCostUsd: input.maxCostUsd } : {}),
       openPr: input.openPr ?? true,
       status: 'pending',
       attempts: 0,
@@ -97,6 +101,8 @@ export class FleetHub {
     const next = cancelJob(job, this.now());
     if (next !== job) {
       this.jobs.set(id, next);
+      // Sub-tasks die with their parent: a cost brake that left them spending would not brake.
+      for (const child of this.jobs.values()) if (child.parent?.jobId === id && child.status !== 'cancelled') this.cancel(child.id);
       this.save();
     }
     return next;

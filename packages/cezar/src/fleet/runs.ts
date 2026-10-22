@@ -11,6 +11,7 @@ import { classifyRepo, cloneHttpsRepo, branchWebUrl, type GitCloneRunner } from 
 import { getRepoInfo } from '../server/git.ts';
 import { createDraftPr } from '../server/pr.ts';
 import type { ProjectContext } from '../server/project-context.ts';
+import { composeDispatchPrompt } from '../dispatch/prompts.ts';
 import { loadWorkflows } from '../workflows/load.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { listProjects, registerProject } from '../workspace/projects.ts';
@@ -128,10 +129,23 @@ export function createFleetRunHost(deps: FleetRunHostDeps): FleetRunHost {
         ...(job.model ? { model: job.model } : {}),
         ...(job.runner ? { runner: job.runner } : {}),
         autonomous: true,
+        // A cross-node sub-task is a dispatched child whose parent lives elsewhere (spec 2026-10-22-fleet-subtasks).
+        ...(job.parent
+          ? {
+              systemPrompt: composeDispatchPrompt(job.kind),
+              dispatch: {
+                rootRunId: job.parent.rootRunId,
+                parentRunId: job.parent.runId,
+                remoteParent: { nodeId: job.parent.nodeId, ...(job.parent.jobId ? { jobId: job.parent.jobId } : {}) },
+                ...(job.kind === 'review' ? { kind: 'review' as const } : {}),
+                ...(job.maxCostUsd ? { budgetUsd: job.maxCostUsd } : {}),
+              },
+            }
+          : {}),
       });
       // The recorded fork point wins in `execute` (and is the PR base); written in the same tick,
       // before the run can read it.
-      project.store.updateRun(run.id, { fleetJobId: job.id, fleetOpenPr: job.openPr, ...(fork ? { baseBranch: fork } : {}) });
+      project.store.updateRun(run.id, { fleetJobId: job.id, fleetOpenPr: job.openPr, ...(job.title ? { title: job.title } : {}), ...(fork ? { baseBranch: fork } : {}) });
       owners.set(run.id, project);
       return run.id;
     },
