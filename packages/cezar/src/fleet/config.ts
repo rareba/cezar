@@ -15,7 +15,7 @@ export const FLEET_DEFAULT_JOB_TIMEOUT_MINUTES = 240;
 export type FleetConfig =
   | { role: 'off' }
   | { role: 'invalid'; error: string }
-  | { role: 'hub'; token: string; nodeId: string; port: number; bind: string; jobTimeoutMs: number; tags: string[] }
+  | { role: 'hub'; token: string; nodeId: string; port: number; bind: string; jobTimeoutMs: number; tags: string[]; eventsWebhook?: string }
   | { role: 'worker'; token: string; nodeId: string; hubUrl: string; jobTimeoutMs: number; tags: string[] };
 
 type Env = Record<string, string | undefined>;
@@ -43,7 +43,9 @@ export function fleetConfigFromEnv(env: Env = process.env): FleetConfig {
     if (!/^https?:\/\//i.test(hubUrl)) return { role: 'invalid', error: 'CEZ_FLEET_HUB_URL must be an http(s) URL' };
     return { role: 'worker', token, nodeId, hubUrl, jobTimeoutMs, tags };
   }
+  const eventsWebhook = env.CEZ_FLEET_EVENTS_WEBHOOK?.trim();
+  if (eventsWebhook && !/^https?:\/\//i.test(eventsWebhook)) return { role: 'invalid', error: 'CEZ_FLEET_EVENTS_WEBHOOK must be an http(s) URL' };
   const port = env.CEZ_FLEET_PORT ? Number(env.CEZ_FLEET_PORT) : FLEET_DEFAULT_PORT;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { role: 'invalid', error: 'CEZ_FLEET_PORT must be a port number' };
-  return { role: 'hub', token, nodeId, port, bind: env.CEZ_FLEET_BIND?.trim() || '0.0.0.0', jobTimeoutMs, tags };
+  return { role: 'hub', token, nodeId, port, bind: env.CEZ_FLEET_BIND?.trim() || '0.0.0.0', jobTimeoutMs, tags, ...(eventsWebhook ? { eventsWebhook } : {}) };
 }

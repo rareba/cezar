@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   FleetHeartbeat,
   FleetHeartbeatResponse,
+  FleetEvent,
   FleetJob,
   FleetLease,
   FleetLeaseAcquire,
@@ -14,6 +15,7 @@ import type {
   FleetSubmit,
 } from '@open-mercato/cezar-contract';
 import { LeaseTable } from './leases.ts';
+import { EventLog, type EventState } from './events.ts';
 import { MailTable } from './mailbox.ts';
 import { fleetMetrics } from './metrics.ts';
 import {
@@ -44,6 +46,8 @@ export interface FleetHubOptions {
   initialMail?: readonly FleetMail[];
   persistMail?: (mail: FleetMail[]) => void;
   /** Node ids an operator drained (drain.json) and its writer. */
+  initialEvents?: EventState;
+  persistEvents?: (state: EventState) => void;
   initialDrained?: readonly string[];
   persistDrained?: (nodeIds: string[]) => void;
   now?: () => number;
@@ -62,11 +66,13 @@ export class FleetHub {
   private readonly persist: (jobs: FleetJob[]) => void;
   private readonly leases: LeaseTable;
   private readonly mail: MailTable;
+  readonly events: EventLog;
   private readonly drained: Set<string>;
   private readonly persistDrained: (nodeIds: string[]) => void;
 
   constructor(options: FleetHubOptions = {}) {
     this.now = options.now ?? Date.now;
+    this.events = new EventLog(options.initialEvents, this.now, options.persistEvents);
     this.drained = new Set(options.initialDrained);
     this.persistDrained = options.persistDrained ?? (() => {});
     const persistMail = options.persistMail ?? (() => {});
@@ -137,7 +143,10 @@ export class FleetHub {
   sweep(): void {
     const now = this.now();
     const expired = expireLeases([...this.jobs.values()], now);
-    for (const job of expired) this.jobs.set(job.id, job);
+    for (const job of expired) {
+      this.jobs.set(job.id, job);
+      if (job.status === 'failed') this.events.emit('failed', job);
+    }
     for (const [id, node] of this.nodes) {
       if (now - Date.parse(node.lastSeen) > FORGET_NODE_MS) this.nodes.delete(id);
     }
@@ -162,6 +171,16 @@ export class FleetHub {
     this.mail.accept(mail, this.jobs);
   }
 
+  /** One event per transition, from the one place that sees them all (spec 2026-10-22-fleet-events). */
+  private recordTransition(before: FleetJob | undefined, after: FleetJob): void {
+    if (!before) return;
+    const held = (s: FleetJob['status']): boolean => s === 'running' || s === 'review';
+    if (before.status === 'assigned' && (held(after.status) || after.status === 'done' || after.status === 'failed')) this.events.emit('started', after);
+    if (!before.needsInput && after.needsInput) this.events.emit('needs-input', after, { question: after.needsInput });
+    if (before.status !== 'done' && after.status === 'done') this.events.emit('finished', after);
+    else if (before.status !== 'failed' && after.status === 'failed') this.events.emit('failed', after);
+  }
+
   /** Mark a node as taking no new jobs (or take the mark off). Survives a hub restart. */
   setDrain(nodeId: string, drain: boolean): void {
     if (drain === this.drained.has(nodeId)) return;
@@ -174,6 +193,10 @@ export class FleetHub {
     } catch (error) {
       console.warn(`fleet: could not save drain.json (${error instanceof Error ? error.message : String(error)})`);
     }
+  }
+
+  eventsSince(seq: number, waitMs = 0): Promise<{ events: FleetEvent[]; next: number }> {
+    return this.events.wait(seq, waitMs);
   }
 
   metrics(): FleetMetrics {
@@ -207,6 +230,7 @@ export class FleetHub {
       if (outcome.action === 'cancel') cancel.push(report.id);
       else if (outcome.action === 'drop') drop.push(report.id);
       else {
+        this.recordTransition(this.jobs.get(report.id), outcome.job);
         this.jobs.set(report.id, outcome.job);
         changed ||= outcome.changed;
       }

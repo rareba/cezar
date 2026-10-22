@@ -178,7 +178,9 @@ export function createFleetRunHost(deps: FleetRunHostDeps): FleetRunHost {
       // An autonomous run only parks at `waiting` once its nudge cap is spent and nobody is there
       // to answer: publish what exists. A usage-limit stop schedules its own resume: still running.
       const status = run.status === 'waiting' ? 'review' : run.status === 'failed' && run.autoResumeAt ? 'running' : run.status;
-      return { status, branch: run.branch, error: run.error };
+      // An unanswered CEZ:ASK is something a person has to see; the hub raises it once (spec 2026-10-22-fleet-events).
+      const needsInput = run.status === 'waiting' && run.askParked ? (run.dispatch?.pendingAsk?.questions.join(' | ') || 'the agent asked a question and is waiting') : undefined;
+      return { status, branch: run.branch, error: run.error, ...(needsInput ? { needsInput } : {}) };
     },
 
     cancel(runId) {

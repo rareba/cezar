@@ -53,6 +53,8 @@ export const fleetJobSchema = z.object({
   /** Web page of the pushed branch, when the host is not GitHub (no PR is opened there). */
   branchUrl: z.string().optional(),
   error: z.string().optional(),
+  /** The question the run stopped on (a `CEZ:ASK`), once it has asked one. */
+  needsInput: z.string().max(400).optional(),
   leaseExpiresAt: z.string().optional(),
   attempts: z.number().int().nonnegative(),
   createdAt: z.string(),
@@ -99,6 +101,7 @@ export const fleetJobReportSchema = z.object({
   prUrl: z.string().optional(),
   branchUrl: z.string().optional(),
   error: z.string().optional(),
+  needsInput: z.string().max(400).optional(),
 });
 export type FleetJobReport = z.infer<typeof fleetJobReportSchema>;
 
@@ -245,6 +248,36 @@ export type FleetPanel = z.infer<typeof fleetPanelSchema>;
 
 export const fleetJobParamsSchema = z.object({ id: z.string().min(1).max(100) });
 export type FleetJobParams = z.infer<typeof fleetJobParamsSchema>;
+
+/**
+ * A hub-side event (spec 2026-10-22-fleet-events): one per job transition worth an alert, recorded
+ * once by the hub. `seq` is the cursor consumers resume from; `text` is a ready-to-send one-liner.
+ */
+export const fleetEventSchema = z.object({
+  seq: z.number().int().positive(),
+  at: z.string(),
+  type: z.enum(['started', 'finished', 'failed', 'needs-input']),
+  jobId: z.string(),
+  title: z.string(),
+  nodeId: z.string().optional(),
+  runId: z.string().optional(),
+  prUrl: z.string().optional(),
+  branch: z.string().optional(),
+  branchUrl: z.string().optional(),
+  error: z.string().optional(),
+  question: z.string().optional(),
+  text: z.string(),
+});
+export type FleetEvent = z.infer<typeof fleetEventSchema>;
+
+export const fleetEventsResponseSchema = z.object({ events: z.array(fleetEventSchema), next: z.number().int().nonnegative() });
+export type FleetEventsResponse = z.infer<typeof fleetEventsResponseSchema>;
+
+export const fleetEventsQuerySchema = z.object({
+  since: z.coerce.number().int().nonnegative().optional(),
+  /** Long-poll: seconds to wait for a first event (max 25). */
+  wait: z.coerce.number().min(0).max(25).optional(),
+});
 
 export const fleetDrainSchema = z.object({ drain: z.boolean() });
 export type FleetDrain = z.infer<typeof fleetDrainSchema>;
