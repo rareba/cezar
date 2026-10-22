@@ -45,6 +45,8 @@ export interface FleetWorkerOptions {
   intervalMs?: number;
   /** The leases this node stands behind; the heartbeat names them so the hub keeps them alive. */
   leases?: () => Promise<FleetLeaseRef[]> | FleetLeaseRef[];
+  /** Capabilities this node advertises. */
+  tags?: () => string[];
   /** This node's mail: sub-task reports to a remote parent, and what the hub hands in. */
   mailbox?: NodeMailbox;
   /** A job older than this is failed and its run cancelled. Unset = no limit (tests). */
@@ -151,6 +153,7 @@ export class FleetWorker {
           version: this.options.version,
           capacity: { free: Math.max(0, free - starting), max },
           host: hostMetrics(),
+          ...(this.options.tags ? { tags: this.options.tags() } : {}),
           jobs: reports,
           ...(leases ? { leases } : {}),
           ...(outbox.length > 0 ? { outbox } : {}),

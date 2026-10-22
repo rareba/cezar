@@ -202,6 +202,23 @@ task, on any node; a child is addressed by the job id `cez task create` printed.
 node heartbeat in both directions (delivery within about 5 s) and is kept on the hub until the
 recipient's node acknowledges it. See `.ai/specs/2026-10-22-fleet-mailbox.md`.
 
+## Capabilities, drain and metrics
+
+Nodes advertise tags (`CEZ_FLEET_TAGS=docker,android,gpu`; the platform `macos`, `windows` or
+`linux` is added automatically). A job can require tags, and the hub hands it only to a node that
+advertises all of them:
+
+```bash
+cezar fleet submit "run the android e2e" --repo owner/app --requires android
+cez task create "build the ios app" --requires macos,ios      # inside a task
+```
+
+`cezar fleet drain <node>` stops a node taking new jobs (what it holds finishes; `--undo` reverts).
+`cezar fleet metrics` (or `GET /api/v1/fleet/metrics`, `?format=prometheus` for Prometheus text)
+reports per pool (`any` and one per tag) the pending jobs, running jobs and free slots, which is
+what an autoscaler reads: scale a pool out while `pending` exceeds `freeSlots`, scale in by draining
+an idle node and removing it. See `.ai/specs/2026-10-22-fleet-routing.md`.
+
 ## Limits
 
 - Single hub, no HA. The queue is restart-safe through `jobs.json`; running jobs are kept if nodes

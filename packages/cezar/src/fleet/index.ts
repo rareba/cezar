@@ -6,6 +6,8 @@ import { LocalLeases, type LocalLease } from './leases-local.ts';
 import { loadLeases, saveLeases } from './leases-store.ts';
 import { NodeMailbox } from './mailbox.ts';
 import { loadMail, saveMail } from './mail-store.ts';
+import { loadDrained, saveDrained } from './drain-store.ts';
+import { platform } from 'node:os';
 import { createFleetRunHost, type BootProject } from './runs.ts';
 import { startFleetServer } from './server.ts';
 import { setFleetView, hubView, remoteView } from './view.ts';
@@ -22,6 +24,12 @@ export interface CapacitySource {
   busy(): number;
   freeCapacity?(): { main: number };
   effectiveLimits?(): { main: number };
+}
+
+/** What this node advertises: the configured tags plus its platform (`macos`, `windows`, `linux`). */
+export function nodeTags(configured: readonly string[]): string[] {
+  const os = platform() === 'darwin' ? 'macos' : platform() === 'win32' ? 'windows' : 'linux';
+  return [...new Set([...configured, os])];
 }
 
 /** Free slots on this node (works on a semaphore with or without per-pool limits). */
@@ -66,7 +74,7 @@ export function startFleet(deps: StartFleetDeps): { stop(): void } {
   const localLeases = new LocalLeases();
   const mailbox = new NodeMailbox(() => config.nodeId);
   if (config.role === 'hub') {
-    const hub = new FleetHub({ initialJobs: loadJobs(), persist: saveJobs, initialLeases: loadLeases(), persistLeases: saveLeases, initialMail: loadMail(), persistMail: saveMail });
+    const hub = new FleetHub({ initialJobs: loadJobs(), persist: saveJobs, initialLeases: loadLeases(), persistLeases: saveLeases, initialMail: loadMail(), persistMail: saveMail, initialDrained: loadDrained(), persistDrained: saveDrained });
     setFleetView(hubView(hub, config.nodeId, localLeases, mailbox));
     const server = startFleetServer(hub, config.token, config.port, config.bind);
     const sweep = setInterval(() => hub.sweep(), SWEEP_MS);
@@ -91,6 +99,7 @@ export function startFleet(deps: StartFleetDeps): { stop(): void } {
     transport,
     capacity: () => localCapacity(deps.semaphore),
     mailbox,
+    tags: () => nodeTags(config.tags),
     leases: async () => {
       if (deps.runAlive) await localLeases.prune(deps.runAlive);
       return localLeases.list();
