@@ -25,19 +25,25 @@ const iso = (ms: number): string => new Date(ms).toISOString();
  */
 export function planAssignments(pending: readonly FleetJob[], nodes: readonly FleetNode[], now: number): Map<string, string> {
   const free = new Map<string, number>();
+  const tags = new Map<string, ReadonlySet<string>>();
   for (const node of nodes) {
-    if (now - Date.parse(node.lastSeen) <= NODE_TTL_MS && node.capacity.free > 0) free.set(node.nodeId, node.capacity.free);
+    // A draining node takes no new work; what it holds finishes.
+    if (!node.draining && now - Date.parse(node.lastSeen) <= NODE_TTL_MS && node.capacity.free > 0) {
+      free.set(node.nodeId, node.capacity.free);
+      tags.set(node.nodeId, new Set(node.tags ?? []));
+    }
   }
   const plan = new Map<string, string>();
   const fifo = [...pending].filter((j) => j.status === 'pending').sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const job of fifo) {
     let best: string | undefined;
     for (const [nodeId, room] of free) {
-      if (room <= 0) continue;
+      if (room <= 0 || !(job.requires ?? []).every((tag) => tags.get(nodeId)?.has(tag))) continue;
       const bestRoom = best === undefined ? 0 : (free.get(best) ?? 0);
       if (best === undefined || room > bestRoom || (room === bestRoom && nodeId < best)) best = nodeId;
     }
-    if (best === undefined) break;
+    // No node can take THIS job (full, or lacks a tag): a later job that needs less may still go.
+    if (best === undefined) continue;
     plan.set(job.id, best);
     free.set(best, (free.get(best) ?? 0) - 1);
   }

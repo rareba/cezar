@@ -26,6 +26,9 @@ export const fleetParentSchema = z.object({
 });
 export type FleetParent = z.infer<typeof fleetParentSchema>;
 
+/** A capability a node advertises and a job can require: `docker`, `android`, `macos`, `gpu`. */
+export const fleetTagSchema = z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,39}$/);
+
 export const fleetJobSchema = z.object({
   id: z.string(),
   repoUrl: z.string(),
@@ -40,6 +43,8 @@ export const fleetJobSchema = z.object({
   title: z.string().max(120).optional(),
   kind: z.enum(['implement', 'review']).optional(),
   maxCostUsd: z.number().positive().optional(),
+  /** The job runs only on a node advertising every one of these tags. */
+  requires: z.array(fleetTagSchema).max(8).optional(),
   status: fleetJobStatusSchema,
   nodeId: z.string().optional(),
   runId: z.string().optional(),
@@ -68,6 +73,7 @@ export const fleetSubmitSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
   kind: z.enum(['implement', 'review']).optional(),
   maxCostUsd: z.number().positive().optional(),
+  requires: z.array(fleetTagSchema).max(8).optional(),
 });
 export type FleetSubmit = z.infer<typeof fleetSubmitSchema>;
 
@@ -77,6 +83,10 @@ export const fleetNodeSchema = z.object({
   capacity: z.object({ free: z.number().int().nonnegative(), max: z.number().int().nonnegative() }),
   host: z.object({ cpuPct: z.number().optional(), memAvailableBytes: z.number().optional() }),
   version: z.string(),
+  /** Capabilities this node advertises (`CEZ_FLEET_TAGS` plus its platform). */
+  tags: z.array(fleetTagSchema).max(20).optional(),
+  /** Takes no new jobs; what it holds finishes. Set by the node or by `cezar fleet drain`. */
+  draining: z.boolean().optional(),
 });
 export type FleetNode = z.infer<typeof fleetNodeSchema>;
 
@@ -235,6 +245,44 @@ export type FleetPanel = z.infer<typeof fleetPanelSchema>;
 
 export const fleetJobParamsSchema = z.object({ id: z.string().min(1).max(100) });
 export type FleetJobParams = z.infer<typeof fleetJobParamsSchema>;
+
+export const fleetDrainSchema = z.object({ drain: z.boolean() });
+export type FleetDrain = z.infer<typeof fleetDrainSchema>;
+
+/**
+ * `GET /api/v1/fleet/metrics` — what an autoscaler reads (spec 2026-10-22-fleet-routing). A pool is
+ * `any` (all nodes, all pending jobs) or one tag: its pending jobs are the ones REQUIRING the tag,
+ * its slots those of live, non-draining nodes advertising it. A tag only pending jobs ask for still
+ * appears, with no nodes, so a scaler can start the first node of a pool.
+ */
+export const fleetPoolMetricsSchema = z.object({
+  pool: z.string(),
+  pending: z.number().int().nonnegative(),
+  running: z.number().int().nonnegative(),
+  nodes: z.number().int().nonnegative(),
+  freeSlots: z.number().int().nonnegative(),
+  maxSlots: z.number().int().nonnegative(),
+});
+export type FleetPoolMetrics = z.infer<typeof fleetPoolMetricsSchema>;
+
+export const fleetMetricsSchema = z.object({
+  at: z.string(),
+  nodes: z.object({ total: z.number().int(), live: z.number().int(), draining: z.number().int() }),
+  pools: z.array(fleetPoolMetricsSchema),
+  /** Per node, so a scaler can pick an idle drained node to remove. */
+  nodeList: z.array(
+    z.object({
+      nodeId: z.string(),
+      live: z.boolean(),
+      draining: z.boolean(),
+      tags: z.array(z.string()),
+      running: z.number().int().nonnegative(),
+      freeSlots: z.number().int().nonnegative(),
+      maxSlots: z.number().int().nonnegative(),
+    }),
+  ),
+});
+export type FleetMetrics = z.infer<typeof fleetMetricsSchema>;
 
 export const fleetErrorSchema = z.object({ error: z.string() });
 export type FleetErrorResponse = z.infer<typeof fleetErrorSchema>;

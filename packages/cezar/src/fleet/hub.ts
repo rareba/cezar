@@ -8,12 +8,14 @@ import type {
   FleetLeaseAcquireResponse,
   FleetMail,
   FleetMailSubmit,
+  FleetMetrics,
   FleetNode,
   FleetStatusResponse,
   FleetSubmit,
 } from '@open-mercato/cezar-contract';
 import { LeaseTable } from './leases.ts';
 import { MailTable } from './mailbox.ts';
+import { fleetMetrics } from './metrics.ts';
 import {
   LEASE_MS,
   applyReport,
@@ -41,6 +43,9 @@ export interface FleetHubOptions {
   /** Undelivered task mail (mail.json) and its writer. */
   initialMail?: readonly FleetMail[];
   persistMail?: (mail: FleetMail[]) => void;
+  /** Node ids an operator drained (drain.json) and its writer. */
+  initialDrained?: readonly string[];
+  persistDrained?: (nodeIds: string[]) => void;
   now?: () => number;
   newId?: () => string;
 }
@@ -57,9 +62,13 @@ export class FleetHub {
   private readonly persist: (jobs: FleetJob[]) => void;
   private readonly leases: LeaseTable;
   private readonly mail: MailTable;
+  private readonly drained: Set<string>;
+  private readonly persistDrained: (nodeIds: string[]) => void;
 
   constructor(options: FleetHubOptions = {}) {
     this.now = options.now ?? Date.now;
+    this.drained = new Set(options.initialDrained);
+    this.persistDrained = options.persistDrained ?? (() => {});
     const persistMail = options.persistMail ?? (() => {});
     this.mail = new MailTable(options.initialMail, this.now, (all) => {
       try {
@@ -99,6 +108,7 @@ export class FleetHub {
       ...(input.title ? { title: input.title } : {}),
       ...(input.kind ? { kind: input.kind } : {}),
       ...(input.maxCostUsd ? { maxCostUsd: input.maxCostUsd } : {}),
+      ...(input.requires?.length ? { requires: [...new Set(input.requires)] } : {}),
       openPr: input.openPr ?? true,
       status: 'pending',
       attempts: 0,
@@ -152,6 +162,24 @@ export class FleetHub {
     this.mail.accept(mail, this.jobs);
   }
 
+  /** Mark a node as taking no new jobs (or take the mark off). Survives a hub restart. */
+  setDrain(nodeId: string, drain: boolean): void {
+    if (drain === this.drained.has(nodeId)) return;
+    if (drain) this.drained.add(nodeId);
+    else this.drained.delete(nodeId);
+    const node = this.nodes.get(nodeId);
+    if (node) this.nodes.set(nodeId, { ...node, ...(drain ? { draining: true } : { draining: undefined }) });
+    try {
+      this.persistDrained([...this.drained]);
+    } catch (error) {
+      console.warn(`fleet: could not save drain.json (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+
+  metrics(): FleetMetrics {
+    return fleetMetrics([...this.jobs.values()], [...this.nodes.values()], this.now());
+  }
+
   listLeases(): FleetLease[] {
     this.leases.sweep();
     return this.leases.list();
@@ -160,7 +188,11 @@ export class FleetHub {
   heartbeat(hb: FleetHeartbeat): FleetHeartbeatResponse {
     const now = this.now();
     const { jobs: reports, leases: _leases, outbox, mailAck, ...nodeInfo } = hb;
-    const node: FleetNode = { ...nodeInfo, lastSeen: new Date(now).toISOString() };
+    const node: FleetNode = {
+      ...nodeInfo,
+      lastSeen: new Date(now).toISOString(),
+      ...(nodeInfo.draining || this.drained.has(hb.nodeId) ? { draining: true } : {}),
+    };
     this.nodes.set(hb.nodeId, node);
     this.sweep();
     if (hb.leases) this.leases.syncNode(hb.nodeId, hb.leases);

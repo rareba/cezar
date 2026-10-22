@@ -2562,6 +2562,7 @@ export class RunManager {
         ...(budget.budgetUsd !== undefined ? { maxCostUsd: budget.budgetUsd } : {}),
         ...(runner ? { runner } : {}),
         ...(model ? { model } : {}),
+        ...(input.requires?.length ? { requires: input.requires } : {}),
         parent: { nodeId: remote.nodeId, runId: parentId, rootRunId, ...(remote.parentJobId ? { jobId: remote.parentJobId } : {}), ...(this.projectId ? { projectId: this.projectId } : {}) },
       });
     } catch (error) {

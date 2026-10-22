@@ -10,12 +10,12 @@ describe('fleetConfigFromEnv', () => {
   });
   it('configures a hub with defaults', () => {
     expect(fleetConfigFromEnv({ CEZ_FLEET_HUB: '1', CEZ_FLEET_TOKEN: TOKEN, CEZ_FLEET_NODE_ID: 'n' })).toEqual({
-      role: 'hub', token: TOKEN, nodeId: 'n', port: 4330, bind: '0.0.0.0', jobTimeoutMs: 240 * 60_000,
+      role: 'hub', token: TOKEN, nodeId: 'n', port: 4330, bind: '0.0.0.0', jobTimeoutMs: 240 * 60_000, tags: [],
     });
   });
   it('configures a worker and trims the hub URL', () => {
     expect(fleetConfigFromEnv({ CEZ_FLEET_HUB_URL: 'http://hub:4330/', CEZ_FLEET_TOKEN: TOKEN, CEZ_FLEET_NODE_ID: 'w' })).toEqual({
-      role: 'worker', token: TOKEN, nodeId: 'w', hubUrl: 'http://hub:4330', jobTimeoutMs: 240 * 60_000,
+      role: 'worker', token: TOKEN, nodeId: 'w', hubUrl: 'http://hub:4330', jobTimeoutMs: 240 * 60_000, tags: [],
     });
   });
   it('refuses a missing or short token for any role', () => {
@@ -27,6 +27,11 @@ describe('fleetConfigFromEnv', () => {
     expect(fleetConfigFromEnv({ ...env, CEZ_FLEET_JOB_TIMEOUT_MINUTES: '30' })).toMatchObject({ jobTimeoutMs: 30 * 60_000 });
     expect(fleetConfigFromEnv({ ...env, CEZ_FLEET_JOB_TIMEOUT_MINUTES: '0' })).toMatchObject({ role: 'invalid' });
     expect(fleetConfigFromEnv({ ...env, CEZ_FLEET_JOB_TIMEOUT_MINUTES: 'abc' })).toMatchObject({ role: 'invalid' });
+  });
+  it('reads tags, lowercased and de-duplicated, and refuses an odd one', () => {
+    const env = { CEZ_FLEET_HUB_URL: 'http://h', CEZ_FLEET_TOKEN: TOKEN };
+    expect(fleetConfigFromEnv({ ...env, CEZ_FLEET_TAGS: 'Docker, android,docker' })).toMatchObject({ tags: ['docker', 'android'] });
+    expect(fleetConfigFromEnv({ ...env, CEZ_FLEET_TAGS: 'bad tag' })).toMatchObject({ role: 'invalid' });
   });
   it('refuses hub + worker at once, a non-http hub URL and a bad port', () => {
     expect(fleetConfigFromEnv({ CEZ_FLEET_HUB: '1', CEZ_FLEET_HUB_URL: 'http://h', CEZ_FLEET_TOKEN: TOKEN })).toMatchObject({ role: 'invalid' });

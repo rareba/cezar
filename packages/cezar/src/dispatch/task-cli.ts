@@ -30,6 +30,7 @@ const USAGE = `cez task — dispatch cezar tasks from inside a task (on by defau
                   [--scope "…"] [--budget <usd>] [--success "…"] [--evidence "…"] [--tools A,B]
                   [--runner ${RUNNER_IDS.join('|')}] [--model <model>] [--retry-limit <0-3>]
                   [--local]       (fleet only) run it on this node instead of any node
+                  [--requires docker,gpu]   (fleet only) only a node advertising these tags runs it
   cez task report --status done|partial|failed|blocked --result "…" [--evidence "…"]…
                   [--verdict approve|changes|reject] [--suggestions "…"]… [--confidence <0-1>]
                   [--side-effect "…"]… [--error "…"]… [--next "…"]
@@ -106,6 +107,7 @@ export async function runTaskCommand(
             model: { type: 'string' },
             'retry-limit': { type: 'string' },
             local: { type: 'boolean', default: false },
+            requires: { type: 'string' },
           },
         });
         const objective = positionals.join(' ').trim();
@@ -125,6 +127,7 @@ export async function runTaskCommand(
           ...(values.model ? { model: values.model } : {}),
           ...(values['retry-limit'] !== undefined ? { retry_limit: number(values['retry-limit'], 'retry-limit') } : {}),
           ...(values.local ? { local: true } : {}),
+          ...(values.requires ? { requires: values.requires.split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean) } : {}),
         };
         const response = await io.fetch(`${api.scope}/runs/${encodeURIComponent(env.CEZ_TASK_ID)}/dispatch`, {
           method: 'POST',

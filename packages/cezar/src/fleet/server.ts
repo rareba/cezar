@@ -3,10 +3,11 @@ import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { fleetHeartbeatSchema, fleetLeaseAcquireSchema, fleetLeaseRefSchema, fleetSubmitSchema } from '@open-mercato/cezar-contract';
+import { fleetDrainSchema, fleetHeartbeatSchema, fleetLeaseAcquireSchema, fleetLeaseRefSchema, fleetSubmitSchema } from '@open-mercato/cezar-contract';
 import { jsonZodValidator, paramZodValidator } from '../server/validators.ts';
 import { FLEET_MIN_TOKEN_LENGTH } from './config.ts';
 import type { FleetHub } from './hub.ts';
+import { prometheusText } from './metrics.ts';
 
 /**
  * The fleet listener (spec 2026-10-21-fleet-coordination): a SEPARATE port from the cockpit that
@@ -36,6 +37,7 @@ export function fleetAuth(token: string): MiddlewareHandler {
 const limit = (maxSize: number) => bodyLimit({ maxSize, onError: (c) => c.json({ error: 'payload too large' }, 413) });
 
 const jobIdParam = z.object({ id: z.string().min(1).max(100) });
+const nodeIdParam = z.object({ id: z.string().min(1).max(200) });
 
 export function createFleetApp(hub: FleetHub, token: string) {
   const routes = new Hono()
@@ -43,6 +45,15 @@ export function createFleetApp(hub: FleetHub, token: string) {
     .post('/heartbeat', limit(512 * 1024), jsonZodValidator(fleetHeartbeatSchema), (c) => c.json(hub.heartbeat(c.req.valid('json'))))
     .get('/status', (c) => c.json(hub.status()))
     .post('/jobs', limit(256 * 1024), jsonZodValidator(fleetSubmitSchema), (c) => c.json(hub.submit(c.req.valid('json')), 201))
+    .get('/metrics', (c) => {
+      const metrics = hub.metrics();
+      if (c.req.query('format') !== 'prometheus') return c.json(metrics);
+      return c.text(prometheusText(metrics), 200, { 'content-type': 'text/plain; version=0.0.4' });
+    })
+    .post('/nodes/:id/drain', paramZodValidator(nodeIdParam), limit(1024), jsonZodValidator(fleetDrainSchema), (c) => {
+      hub.setDrain(c.req.valid('param').id, c.req.valid('json').drain);
+      return c.json({ nodeId: c.req.valid('param').id, draining: c.req.valid('json').drain });
+    })
     .get('/leases', (c) => c.json({ leases: hub.listLeases() }))
     .post('/leases/acquire', limit(4 * 1024), jsonZodValidator(fleetLeaseAcquireSchema), (c) => c.json(hub.acquireLease(c.req.valid('json'))))
     .post('/leases/renew', limit(4 * 1024), jsonZodValidator(fleetLeaseRefSchema), (c) => {

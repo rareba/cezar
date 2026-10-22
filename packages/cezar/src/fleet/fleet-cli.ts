@@ -6,6 +6,7 @@
 import { parseArgs } from 'node:util';
 import {
   fleetJobSchema,
+  fleetMetricsSchema,
   fleetStatusResponseSchema,
   runnerSchema,
   type FleetJob,
@@ -35,10 +36,12 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const USAGE = `cezar fleet — hand work to a fleet of cezar instances (CEZ_FLEET_HUB_URL + CEZ_FLEET_TOKEN)
 
   cezar fleet submit "<task>" [--repo <url>] [--base <branch>] [--workflow <name>]
-                    [--runner <id>] [--model <model>] [--no-pr]
+                    [--runner <id>] [--model <model>] [--requires docker,gpu] [--no-pr]
                     queue a job; --repo defaults to this directory's git remote
   cezar fleet status [--json]     nodes and jobs
-  cezar fleet cancel <jobId>      cancel a queued or running job`;
+  cezar fleet cancel <jobId>      cancel a queued or running job
+  cezar fleet drain <node> [--undo]   a node takes no new jobs; what it holds finishes
+  cezar fleet metrics [--prometheus]  pending jobs and free slots per pool (what an autoscaler reads)`;
 
 function hubBase(env: FleetCliEnv): string | null {
   const url = env.CEZ_FLEET_HUB_URL?.trim().replace(/\/+$/, '');
@@ -99,6 +102,7 @@ export async function runFleetCommand(
           workflow: { type: 'string' },
           runner: { type: 'string' },
           model: { type: 'string' },
+          requires: { type: 'string' },
           'no-pr': { type: 'boolean', default: false },
         },
       });
@@ -114,6 +118,7 @@ export async function runFleetCommand(
         ...(values.workflow ? { workflowId: values.workflow } : {}),
         ...(runner ? { runner } : {}),
         ...(values.model ? { model: values.model } : {}),
+        ...(values.requires ? { requires: values.requires.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean) } : {}),
         ...(values['no-pr'] ? { openPr: false } : {}),
       };
       const job = fleetJobSchema.parse(await call('/jobs', { method: 'POST', body: JSON.stringify(body) }));
@@ -130,10 +135,30 @@ export async function runFleetCommand(
       io.log(status.nodes.length === 0 ? 'no nodes' : 'nodes:');
       for (const n of status.nodes) {
         const stale = Date.now() - Date.parse(n.lastSeen) > NODE_TTL_MS ? '  STALE' : '';
-        io.log(`  ${n.nodeId}  ${n.capacity.free}/${n.capacity.max} free  v${n.version}  seen ${n.lastSeen}${stale}`);
+        const tags = n.tags?.length ? `  [${n.tags.join(',')}]` : '';
+        io.log(`  ${n.nodeId}  ${n.capacity.free}/${n.capacity.max} free${n.draining ? '  DRAINING' : ''}${tags}  v${n.version}  seen ${n.lastSeen}${stale}`);
       }
       io.log(status.jobs.length === 0 ? 'no jobs' : 'jobs:');
       for (const job of status.jobs) io.log(`  ${line(job)}`);
+      return 0;
+    }
+    if (command === 'drain') {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { undo: { type: 'boolean', default: false } } });
+      const nodeId = positionals[0];
+      if (!nodeId) throw new Error('give the node: cezar fleet drain <node> [--undo]');
+      await call(`/nodes/${encodeURIComponent(nodeId)}/drain`, { method: 'POST', body: JSON.stringify({ drain: !values.undo }) });
+      io.log(values.undo ? `${nodeId} takes jobs again` : `${nodeId} is draining: no new jobs`);
+      return 0;
+    }
+    if (command === 'metrics') {
+      const { values } = parseArgs({ args: rest, options: { prometheus: { type: 'boolean', default: false } } });
+      if (values.prometheus) {
+        const response = await io.fetch(`${base}/api/v1/fleet/metrics?format=prometheus`, { headers: { authorization: `Bearer ${env.CEZ_FLEET_TOKEN}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+        if (!response.ok) throw new Error(await readError(response));
+        io.log((await response.text()).trimEnd());
+        return 0;
+      }
+      io.log(JSON.stringify(fleetMetricsSchema.parse(await call('/metrics')), null, 2));
       return 0;
     }
     if (command === 'cancel') {
