@@ -96,6 +96,8 @@ export const dispatchSchema = z.object({
   reviewOf: z.array(z.string().max(120)).max(8).optional(),
   /** This task's spend ceiling in USD, carved out of its parent's. Absent = none of its own. */
   budgetUsd: z.number().nonnegative().optional(),
+  /** Set when the parent runs on ANOTHER fleet node (spec 2026-10-22-fleet-subtasks): `parentRunId` then names a run that is not in this store. */
+  remoteParent: z.object({ nodeId: z.string(), jobId: z.string().optional() }).optional(),
   /** This task's own report — last one wins. */
   report: dispatchReportSchema.optional(),
   /** Reports from settled children waiting for this task's next session. */
@@ -149,6 +151,10 @@ export const dispatchInputSchema = z
     success_criteria: z.string().max(1000).optional(),
     required_evidence: z.string().max(1000).optional(),
     retry_limit: z.number().int().min(0).max(3).optional(),
+    /** With a fleet: run the child on THIS node instead of handing it to the hub. */
+    local: z.boolean().optional(),
+    /** With a fleet: tags the node running the child must advertise. */
+    requires: z.array(z.string().max(60)).max(8).optional(),
     /** The child's backend and model. Absent = the parent's. */
     runner: runnerSchema.optional(),
     model: z.string().max(200).optional(),
@@ -160,5 +166,7 @@ export type DispatchInput = z.infer<typeof dispatchInputSchema>;
 export const dispatchResponseSchema = z.object({
   id: z.string(),
   branch: z.string().optional(),
+  /** Set when the child went to the fleet hub (it runs on another node; there is no branch yet). */
+  fleet: z.literal(true).optional(),
 });
 export type DispatchResponse = z.infer<typeof dispatchResponseSchema>;

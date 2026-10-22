@@ -6,6 +6,7 @@ import {
   fleetLeaseSchema,
   fleetStatusResponseSchema,
   type FleetJob,
+  type FleetSubmit,
   type FleetLease,
   type FleetLeaseAcquireInput,
   type FleetLeaseAcquireResponse,
@@ -27,6 +28,8 @@ export interface FleetView {
   status(): Promise<FleetStatusResponse>;
   /** `undefined` when the hub does not know the job. */
   cancel(jobId: string): Promise<FleetJob | undefined>;
+  /** Queue a job (a cross-node sub-task). */
+  submit(input: FleetSubmit): Promise<FleetJob>;
   /** Leases (spec 2026-10-22-fleet-leases): taken in this node's name and kept alive by its heartbeat. */
   acquireLease(input: FleetLeaseAcquireInput): Promise<FleetLeaseAcquireResponse>;
   renewLease(ref: FleetLeaseRef): Promise<FleetLease | undefined>;
@@ -47,6 +50,7 @@ export function hubView(hub: FleetHub, nodeId: string, local: LocalLeases = new 
     nodeId,
     status: async () => hub.status(),
     cancel: async (id) => hub.cancel(id),
+    submit: async (input) => hub.submit(input),
     async acquireLease({ projectId, ...input }) {
       const result = hub.acquireLease({ ...input, nodeId });
       if (result.acquired) local.add({ name: input.name, holder: input.holder, runId: input.runId, projectId });
@@ -81,6 +85,11 @@ export function remoteView(hubUrl: string, token: string, nodeId: string, fetchI
     async cancel(id) {
       const res = await call(`/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
       if (res.status === 404) return undefined;
+      if (!res.ok) throw new Error(`hub answered ${res.status}`);
+      return fleetJobSchema.parse(await res.json());
+    },
+    async submit(input) {
+      const res = await call('/jobs', post(input));
       if (!res.ok) throw new Error(`hub answered ${res.status}`);
       return fleetJobSchema.parse(await res.json());
     },

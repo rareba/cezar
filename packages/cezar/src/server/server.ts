@@ -4496,9 +4496,33 @@ export function createApp(deps: ServerDeps) {
 
     /** Create ONE child of run `:id`. Refusals (cap, budget, settled parent) are 409 with the
      *  reason — the same text the parent's transcript notes. */
-    .post('/runs/:id/dispatch', jsonZodValidator(dispatchInputSchema), (c) => {
-      const { manager } = c.get('project');
-      const outcome = manager.dispatch(c.req.param('id'), c.req.valid('json'));
+    .post('/runs/:id/dispatch', jsonZodValidator(dispatchInputSchema), async (c) => {
+      const { manager, store, root } = c.get('project');
+      const { local, ...input } = c.req.valid('json');
+      const parentId = c.req.param('id');
+      // With a fleet role the child goes to the hub and runs on any node (spec 2026-10-22-fleet-subtasks);
+      // `local` keeps it on this one.
+      const view = local ? undefined : getFleetView();
+      if (view) {
+        const repoUrl = (await getRepoInfo(root))?.remote;
+        if (!repoUrl) return c.json({ error: 'this project has no git remote, so another node cannot clone it; pass --local to run the task here.' }, 409);
+        let inFlight: number;
+        try {
+          inFlight = (await view.status()).jobs.filter((job) => job.parent?.runId === parentId && !['done', 'failed', 'cancelled'].includes(job.status)).length;
+        } catch (error) {
+          return c.json({ error: `fleet hub unreachable (${error instanceof Error ? error.message : String(error)}); retry, or pass --local to run the task here.` }, 409);
+        }
+        const outcome = await manager.dispatchRemote(parentId, input, {
+          nodeId: view.nodeId,
+          repoUrl,
+          ...(store.getRun(parentId)?.fleetJobId ? { parentJobId: store.getRun(parentId)?.fleetJobId } : {}),
+          inFlight,
+          submit: (job) => view.submit(job),
+        });
+        if ('refused' in outcome) return c.json({ error: outcome.refused }, 409);
+        return c.json({ id: outcome.id, fleet: true as const }, 201);
+      }
+      const outcome = manager.dispatch(parentId, input);
       if ('refused' in outcome) return c.json({ error: outcome.refused }, 409);
       return c.json(outcome, 201);
     })

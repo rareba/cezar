@@ -88,7 +88,7 @@ import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/stor
 // Task dispatch (spec 2026-09-10-dispatch). Every import below is inert unless the feature is
 // ON *and* the run carries a `dispatch`: `dispatchOf()` is the single gate, and a run without one
 // takes byte-for-byte the path it took before this feature existed.
-import type { DispatchInput, DispatchIntent, DispatchReport, RunDispatch } from '@open-mercato/cezar-contract';
+import type { DispatchInput, DispatchIntent, DispatchReport, FleetSubmit, RunDispatch } from '@open-mercato/cezar-contract';
 import { resolveCapabilities } from '../server/capabilities.ts';
 import { composeDispatchPrompt } from '../dispatch/prompts.ts';
 import {
@@ -2471,13 +2471,18 @@ export class RunManager {
    * unless the order names others, gets a budget carved out of the parent's, and always runs
    * autonomously — a child parked at `waiting` after every turn would need a human per rung.
    */
-  dispatch(
+  /**
+   * The checks every dispatch passes before a child exists: the switch, a live parent, the
+   * in-flight and subtask caps, and the budget carve. Shared by the local and the cross-node path;
+   * `extraInFlight` is the parent's children that run on other nodes (not in this store).
+   */
+  private dispatchPreflight(
     parentId: string,
     input: DispatchInput,
-    /** Internal only (graph nodes — never the route): run the child as this workflow instead of
-     *  the single synthetic step an agent's order gets. */
-    opts: { workflow?: WorkflowDef } = {},
-  ): { id: string; branch?: string } | { refused: string } {
+    extraInFlight = 0,
+  ):
+    | { refused: string }
+    | { parent: RunRecord; runs: RunRecord[]; intent: DispatchIntent | undefined; rootRunId: string; budget: { budgetUsd: number | undefined }; note: (message: string, tone?: 'danger') => void } {
     if (!this.dispatchEnabled()) return { refused: 'dispatch is disabled on this cockpit (CEZ_DISPATCH=0) — the operator turned it off. Do not substitute sub-agents or do the delegated work yourself: stop and report that dispatch is disabled.' };
     const parent = this.store.getRun(parentId);
     if (!parent) return { refused: `no such run: ${parentId}` };
@@ -2490,7 +2495,7 @@ export class RunManager {
     // only tighten the engine's own caps, and the child defaults they name fill an order's gaps.
     const intent = runs.find((r) => r.id === (parent.dispatch?.rootRunId ?? parent.id))?.dispatch?.intent;
     const inFlightCap = Math.min(MAX_CHILDREN_IN_FLIGHT, intent?.inFlight ?? MAX_CHILDREN_IN_FLIGHT);
-    const inFlight = inFlightChildren(runs, parentId).length;
+    const inFlight = inFlightChildren(runs, parentId).length + extraInFlight;
     if (inFlight + 1 > inFlightCap) {
       const refused = `${inFlight} child run${inFlight === 1 ? '' : 's'} already in flight; the cap is ${inFlightCap} per task${intent?.inFlight !== undefined && intent.inFlight < MAX_CHILDREN_IN_FLIGHT ? ' (set by the user)' : ''}. Wait for reports, then dispatch again.`;
       note(`dispatch refused — ${refused}`, 'danger');
@@ -2515,6 +2520,71 @@ export class RunManager {
       note(`dispatch refused — ${budget.refused}`, 'danger');
       return { refused: budget.refused };
     }
+    return { parent: this.store.getRun(parentId) ?? parent, runs, intent, rootRunId, budget, note };
+  }
+
+  /**
+   * Hand ONE child to the fleet hub instead of starting it here (spec 2026-10-22-fleet-subtasks): it
+   * runs on whichever node has room, from the repository's base branch (this task's unpushed branch
+   * is not reachable from another machine), and its work comes back as a PR. Its report reaches this
+   * task through the hub mailbox. The child's id is the fleet job id.
+   */
+  async dispatchRemote(
+    parentId: string,
+    input: DispatchInput,
+    remote: {
+      nodeId: string;
+      repoUrl: string;
+      parentJobId?: string;
+      /** This parent's fleet children not yet settled. */
+      inFlight: number;
+      submit: (job: FleetSubmit) => Promise<{ id: string }>;
+    },
+  ): Promise<{ id: string } | { refused: string }> {
+    const pre = this.dispatchPreflight(parentId, input, remote.inFlight);
+    if ('refused' in pre) return pre;
+    const { parent, rootRunId, budget, intent, note } = pre;
+    if (!parent.dispatch) this.store.updateRun(parentId, { dispatch: { rootRunId } });
+    const title = input.title ?? input.objective.split('\n')[0]?.slice(0, 120) ?? 'dispatched task';
+    const task = childTaskEnvelope(input, { id: parentId }, [
+      '- Runs on another fleet node from the repository base branch: your parent\'s working branch is not available here. Your branch is pushed and a draft PR opened for you when you finish.',
+    ]);
+    const runner = input.runner ?? intent?.runner ?? parent.runner;
+    const model = input.model ?? intent?.model ?? parent.model;
+    let job: { id: string };
+    try {
+      job = await remote.submit({
+        repoUrl: remote.repoUrl,
+        task,
+        title,
+        openPr: true,
+        ...(input.kind ? { kind: input.kind } : {}),
+        ...(budget.budgetUsd !== undefined ? { maxCostUsd: budget.budgetUsd } : {}),
+        ...(runner ? { runner } : {}),
+        ...(model ? { model } : {}),
+        parent: { nodeId: remote.nodeId, runId: parentId, rootRunId, ...(remote.parentJobId ? { jobId: remote.parentJobId } : {}), ...(this.projectId ? { projectId: this.projectId } : {}) },
+      });
+    } catch (error) {
+      const refused = `could not hand the task to the fleet hub (${error instanceof Error ? error.message : String(error)}); retry, or pass --local to run it on this node.`;
+      note(`dispatch refused — ${refused}`, 'danger');
+      return { refused };
+    }
+    note(`dispatched "${title}" to the fleet (${input.kind ?? 'implement'}, job ${job.id})`);
+    const state = this.active.get(parentId);
+    if (state) state.dispatchedThisTurn = true;
+    return { id: job.id };
+  }
+
+  dispatch(
+    parentId: string,
+    input: DispatchInput,
+    /** Internal only (graph nodes — never the route): run the child as this workflow instead of
+     *  the single synthetic step an agent's order gets. */
+    opts: { workflow?: WorkflowDef } = {},
+  ): { id: string; branch?: string } | { refused: string } {
+    const pre = this.dispatchPreflight(parentId, input);
+    if ('refused' in pre) return pre;
+    const { parent, intent, rootRunId, budget, note } = pre;
 
     const title = input.title ?? input.objective.split('\n')[0]?.slice(0, 120) ?? 'dispatched task';
     const workflow: WorkflowDef = {

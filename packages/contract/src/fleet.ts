@@ -13,6 +13,18 @@ export type FleetJobStatus = z.infer<typeof fleetJobStatusSchema>;
 /** Statuses a worker may report for a job it holds (the hub owns pending/assigned/cancelled). */
 export const fleetReportedStatusSchema = z.enum(['running', 'review', 'done', 'failed']);
 
+/** The task that dispatched a fleet job (a cross-node sub-task): where its reports go (spec 2026-10-22-fleet-subtasks). */
+export const fleetParentSchema = z.object({
+  nodeId: z.string().min(1).max(200),
+  runId: z.string().min(1).max(100),
+  /** The parent's tree root (the parent itself when it is the root). */
+  rootRunId: z.string().min(1).max(100),
+  /** Set when the parent is itself a fleet job. */
+  jobId: z.string().max(100).optional(),
+  projectId: z.string().max(100).optional(),
+});
+export type FleetParent = z.infer<typeof fleetParentSchema>;
+
 export const fleetJobSchema = z.object({
   id: z.string(),
   repoUrl: z.string(),
@@ -22,6 +34,11 @@ export const fleetJobSchema = z.object({
   runner: runnerSchema.optional(),
   model: z.string().optional(),
   openPr: z.boolean(),
+  /** Set on a cross-node sub-task. */
+  parent: fleetParentSchema.optional(),
+  title: z.string().max(120).optional(),
+  kind: z.enum(['implement', 'review']).optional(),
+  maxCostUsd: z.number().positive().optional(),
   status: fleetJobStatusSchema,
   nodeId: z.string().optional(),
   runId: z.string().optional(),
@@ -46,6 +63,10 @@ export const fleetSubmitSchema = z.object({
   runner: runnerSchema.optional(),
   model: z.string().trim().min(1).max(200).optional(),
   openPr: z.boolean().optional(),
+  parent: fleetParentSchema.optional(),
+  title: z.string().trim().min(1).max(120).optional(),
+  kind: z.enum(['implement', 'review']).optional(),
+  maxCostUsd: z.number().positive().optional(),
 });
 export type FleetSubmit = z.infer<typeof fleetSubmitSchema>;
 
